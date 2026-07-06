@@ -1,0 +1,19 @@
+:root {
+  color-scheme: light;
+  --bg: #f3efe6;
+  --panel: #fffdf8;
+  --panel-strong: #f1e7d4;
+  --text: #1f2937;
+  --muted: #6b7280;
+  --accent: #0f766e;
+  --accent-2: #be123c;
+  --border: rgba(31, 41, 55, 0.12);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Georgia, 'Times New Roman', serif;
+  background: radial-gradient(circle at top, #fdf6e3, var(--bg));
+  color: var(--text);
+}
+button, input, select, textarea { font: inherit; }
