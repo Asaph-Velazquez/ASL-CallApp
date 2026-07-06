@@ -1,0 +1,86 @@
+# ============================================
+# Dependencies
+# ============================================
+node_modules/
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+.pnpm-store/
+
+# ============================================
+# Build & Distribution
+# ============================================
+dist/
+build/
+build-info.json
+.next/
+.turbo/
+.nuxt/
+.cache/
+coverage/
+.nyc_output/
+
+# ============================================
+# IDE & Editor
+# ============================================
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*.swn
+.sublime-project
+.sublime-workspace
+.DS_Store
+.env.local
+.env.*.local
+
+# ============================================
+# Environment & Secrets
+# ============================================
+.env
+.env.local
+.env.*.local
+.env.production.local
+!.env.example
+!.env.sample
+*.pem
+
+# ============================================
+# Logs
+# ============================================
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.sisyphus/
+
+# ============================================
+# OS & System Files
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ============================================
+# Project-specific
+# ============================================
+*.ps1
+.expo/
+.turbo/
+
+# ============================================
+# Testing
+# ============================================
+.nyc_output/
+coverage/
+*.lcov
+alphabet/
