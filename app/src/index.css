@@ -1,19 +1,586 @@
 :root {
   color-scheme: light;
-  --bg: #f3efe6;
-  --panel: #fffdf8;
-  --panel-strong: #f1e7d4;
-  --text: #1f2937;
-  --muted: #6b7280;
-  --accent: #0f766e;
-  --accent-2: #be123c;
-  --border: rgba(31, 41, 55, 0.12);
+  --bg-primary: #f5f5f5;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #e5e5e5;
+  --text-primary: #1a1a1a;
+  --text-secondary: #4a4a4a;
+  --text-tertiary: #707070;
+  --border-color: rgba(0, 0, 0, 0.1);
+  --nav-bg: rgba(255, 255, 255, 0.95);
+  --hotel-primary: #2563eb;
+  --hotel-secondary: #1d4ed8;
+  --room-service: #059669;
+  --services: #7c3aed;
+  --problem: #dc2626;
+  --extra: #d97706;
+  --success: #16a34a;
+  --warning: #ca8a04;
+  --follow-up: #0f766e;
+  --shadow-soft: 0 16px 40px rgba(15, 23, 42, 0.08);
+  --shadow-card: 0 10px 24px rgba(15, 23, 42, 0.06);
 }
-* { box-sizing: border-box; }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg-primary: #000000;
+    --bg-secondary: #0f0f0f;
+    --bg-tertiary: #1e1e1e;
+    --text-primary: #ffffff;
+    --text-secondary: #d0d0d0;
+    --text-tertiary: #909090;
+    --border-color: rgba(100, 100, 100, 0.3);
+    --nav-bg: rgba(15, 15, 15, 0.95);
+    --hotel-primary: #60a5fa;
+    --hotel-secondary: #3b82f6;
+    --room-service: #34d399;
+    --services: #a78bfa;
+    --problem: #f87171;
+    --extra: #fbbf24;
+    --success: #4ade80;
+    --warning: #facc15;
+    --follow-up: #5eead4;
+    --shadow-soft: 0 16px 40px rgba(0, 0, 0, 0.35);
+    --shadow-card: 0 10px 24px rgba(0, 0, 0, 0.24);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
 body {
   margin: 0;
-  font-family: Georgia, 'Times New Roman', serif;
-  background: radial-gradient(circle at top, #fdf6e3, var(--bg));
-  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Helvetica Neue', sans-serif;
+  color: var(--text-primary);
+  background:
+    radial-gradient(circle at top left, color-mix(in srgb, var(--hotel-primary) 12%, transparent), transparent 34%),
+    radial-gradient(circle at top right, color-mix(in srgb, var(--services) 10%, transparent), transparent 30%),
+    linear-gradient(180deg, var(--bg-primary), color-mix(in srgb, var(--bg-primary) 82%, var(--bg-secondary)));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
-button, input, select, textarea { font: inherit; }
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-radius: 14px;
+  padding: 0.9rem 1rem;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--hotel-primary);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--hotel-primary) 15%, transparent);
+}
+
+textarea {
+  resize: vertical;
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding: 32px 20px 48px;
+}
+
+.app-grid {
+  width: min(1120px, 100%);
+  margin: 0 auto;
+  display: grid;
+  gap: 24px;
+}
+
+.hero-card,
+.panel-card {
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: 28px;
+  box-shadow: var(--shadow-card);
+  backdrop-filter: blur(14px);
+}
+
+.hero-card {
+  padding: 28px;
+  overflow: hidden;
+  position: relative;
+}
+
+.hero-card::after {
+  content: '';
+  position: absolute;
+  inset: -20% auto auto 60%;
+  width: 280px;
+  height: 280px;
+  border-radius: 999px;
+  background: radial-gradient(circle, color-mix(in srgb, var(--services) 18%, transparent), transparent 68%);
+  pointer-events: none;
+}
+
+.hero-topbar {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.brand-lockup {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+.brand-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 22px;
+  display: grid;
+  place-items: center;
+  color: white;
+  background: linear-gradient(135deg, var(--hotel-primary), var(--hotel-secondary));
+  box-shadow: var(--shadow-soft);
+}
+
+.eyebrow,
+.section-kicker {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.eyebrow {
+  color: var(--hotel-primary);
+}
+
+.hero-card h1,
+.panel-card h2 {
+  margin: 8px 0 6px;
+  line-height: 1.05;
+}
+
+.hero-card h1 {
+  font-size: clamp(2rem, 4vw, 3.4rem);
+}
+
+.panel-card h2 {
+  font-size: clamp(1.55rem, 2vw, 2rem);
+}
+
+.hero-copy,
+.section-heading p,
+.status-card span,
+.profile-panel span,
+.live-session-card p,
+.callout-label {
+  color: var(--text-tertiary);
+}
+
+.hero-copy,
+.section-heading p {
+  margin: 0;
+  max-width: 64ch;
+  line-height: 1.55;
+}
+
+.profile-panel {
+  min-width: 230px;
+  padding: 18px;
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--bg-primary) 55%, transparent);
+  border: 1px solid var(--border-color);
+  display: grid;
+  gap: 8px;
+  text-align: right;
+}
+
+.profile-panel strong {
+  font-size: 1rem;
+}
+
+.status-pill,
+.info-badge,
+.ghost-button,
+.primary-button,
+.danger-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  border-radius: 999px;
+  font-weight: 700;
+}
+
+.status-pill,
+.info-badge {
+  width: fit-content;
+  padding: 0.55rem 0.85rem;
+  font-size: 0.82rem;
+}
+
+.status-pill {
+  margin-left: auto;
+  background: color-mix(in srgb, var(--hotel-primary) 10%, var(--bg-secondary));
+  color: var(--hotel-primary);
+}
+
+.hero-metrics {
+  position: relative;
+  z-index: 1;
+  margin-top: 28px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.status-card {
+  background: color-mix(in srgb, var(--bg-primary) 76%, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: 22px;
+  padding: 18px;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.status-card p,
+.status-card strong,
+.status-card span {
+  display: block;
+  margin: 0;
+}
+
+.status-card p {
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+
+.status-card strong {
+  margin-top: 6px;
+  font-size: 1.2rem;
+}
+
+.status-card span {
+  margin-top: 4px;
+  line-height: 1.45;
+}
+
+.status-icon,
+.live-session-avatar {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+}
+
+.panel-card {
+  padding: 26px;
+  display: grid;
+  gap: 20px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field span {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.field-wide,
+.form-grid > button,
+.form-grid > .error-banner,
+.checkbox-field {
+  grid-column: 1 / -1;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: color-mix(in srgb, var(--bg-primary) 72%, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: 18px;
+}
+
+.checkbox-field input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--follow-up);
+}
+
+.primary-button,
+.danger-button,
+.ghost-button {
+  padding: 0.9rem 1.2rem;
+  border: 1px solid transparent;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+.primary-button:hover,
+.danger-button:hover,
+.ghost-button:hover {
+  transform: translateY(-1px);
+}
+
+.primary-button {
+  background: linear-gradient(135deg, var(--hotel-primary), var(--hotel-secondary));
+  color: white;
+  box-shadow: 0 12px 24px color-mix(in srgb, var(--hotel-primary) 28%, transparent);
+}
+
+.danger-button {
+  background: transparent;
+  color: var(--problem);
+  border-color: color-mix(in srgb, var(--problem) 30%, var(--border-color));
+}
+
+.danger-button:hover {
+  background: color-mix(in srgb, var(--problem) 10%, transparent);
+}
+
+.ghost-button {
+  width: fit-content;
+  margin-left: auto;
+  background: transparent;
+  color: var(--text-secondary);
+  border-color: var(--border-color);
+}
+
+.error-banner {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--problem) 12%, transparent);
+  color: var(--problem);
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-weight: 600;
+}
+
+.action-row,
+.report-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.callout-card,
+.live-session-card {
+  border-radius: 22px;
+  border: 1px solid var(--border-color);
+  padding: 18px;
+}
+
+.callout-card {
+  background: color-mix(in srgb, var(--warning) 10%, var(--bg-secondary));
+}
+
+.callout-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.callout-row + .callout-row {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.live-session-card {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--services) 10%, var(--bg-secondary)), color-mix(in srgb, var(--hotel-primary) 8%, var(--bg-secondary)));
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+
+.live-session-identity {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.live-session-avatar {
+  color: var(--services);
+  background: color-mix(in srgb, var(--services) 15%, transparent);
+}
+
+.live-session-identity strong,
+.callout-row strong {
+  font-size: 1rem;
+}
+
+.live-session-identity p {
+  margin: 4px 0 0;
+}
+
+.icon-xl {
+  width: 34px;
+  height: 34px;
+}
+
+.icon-md {
+  width: 22px;
+  height: 22px;
+}
+
+.icon-sm {
+  width: 16px;
+  height: 16px;
+}
+
+.tone-blue {
+  color: var(--hotel-primary);
+  background: color-mix(in srgb, var(--hotel-primary) 11%, transparent);
+}
+
+.tone-green {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 11%, transparent);
+}
+
+.tone-purple {
+  color: var(--services);
+  background: color-mix(in srgb, var(--services) 11%, transparent);
+}
+
+.tone-red {
+  color: var(--problem);
+  background: color-mix(in srgb, var(--problem) 11%, transparent);
+}
+
+.tone-amber {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+}
+
+.tone-teal {
+  color: var(--follow-up);
+  background: color-mix(in srgb, var(--follow-up) 12%, transparent);
+}
+
+.text-blue {
+  color: var(--hotel-primary);
+}
+
+.text-green {
+  color: var(--success);
+}
+
+.text-purple {
+  color: var(--services);
+}
+
+.text-red {
+  color: var(--problem);
+}
+
+.text-amber {
+  color: var(--warning);
+}
+
+.text-teal {
+  color: var(--follow-up);
+}
+
+@media (max-width: 860px) {
+  .hero-topbar,
+  .live-session-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .profile-panel {
+    width: 100%;
+    text-align: left;
+  }
+
+  .ghost-button,
+  .status-pill {
+    margin-left: 0;
+  }
+
+  .hero-metrics,
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-shell {
+    padding: 20px 14px 32px;
+  }
+
+  .hero-card,
+  .panel-card {
+    padding: 20px;
+    border-radius: 22px;
+  }
+
+  .brand-lockup {
+    align-items: flex-start;
+  }
+
+  .brand-icon {
+    width: 60px;
+    height: 60px;
+    border-radius: 18px;
+  }
+
+  .callout-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
