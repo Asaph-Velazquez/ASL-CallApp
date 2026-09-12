@@ -14,7 +14,11 @@ const interpreterReportSchema = new mongoose.Schema(
     category: { type: String, required: true },
     followUpRequired: { type: Boolean, default: true },
     notes: { type: String, default: '' },
-    submittedAt: { type: Date, default: () => new Date() }
+    submittedAt: { type: Date, default: () => new Date() },
+    forwardedToAslWeb: { type: Boolean, default: false, index: true },
+    forwardedAt: { type: Date, default: null },
+    forwardAttemptedAt: { type: Date, default: null },
+    forwardError: { type: String, default: null },
   },
   { timestamps: true, versionKey: false }
 );

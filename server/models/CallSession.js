@@ -17,7 +17,14 @@ const callSessionSchema = new mongoose.Schema(
     requestedAt: { type: Date, default: () => new Date() },
     answeredAt: { type: Date, default: null },
     endedAt: { type: Date, default: null },
-    endReason: { type: String, default: null }
+    endReason: { type: String, default: null },
+    reportForwardedAt: { type: Date, default: null },
+    reportForwardStatus: {
+      type: String,
+      enum: ['pending', 'forwarded', 'failed'],
+      default: 'pending',
+    },
+    reportForwardError: { type: String, default: null },
   },
   { timestamps: true, versionKey: false }
 );
