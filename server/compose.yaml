@@ -1,0 +1,35 @@
+services:
+  asl-callapp-mongo:
+    image: mongo:7
+    container_name: asl-callapp-mongo
+    restart: unless-stopped
+    ports:
+      - "27018:27017"
+    environment:
+      MONGO_INITDB_DATABASE: asl-call
+    volumes:
+      - asl-callapp-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  asl-callapp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      asl-callapp-mongo:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      MONGODB_URI: mongodb://asl-callapp-mongo:27017/asl-call
+    ports:
+      - "3101:3101"
+    restart: unless-stopped
+
+volumes:
+  asl-callapp-mongo-data:
