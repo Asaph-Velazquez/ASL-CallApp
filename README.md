@@ -67,6 +67,8 @@ VITE_CALL_WS_URL=ws://localhost:3101/calls
 - `VITE_CALL_API_URL`: URL base del backend de `ASL-CallApp`
 - `VITE_CALL_WS_URL`: endpoint WebSocket para la sesion de llamada
 
+Si vas a usar la consola del interprete a traves del mismo dominio publico que consume la app movil, esas variables deben apuntar al dominio publicado por `ASL-Web/server`, no a un segundo tunel separado para `3101`.
+
 ### Servidor (`server`)
 
 Crea un archivo `.env` dentro de `server` con valores como estos:
@@ -121,6 +123,20 @@ npm run dev
 ```
 
 La consola web correra en `http://localhost:5173` o el puerto asignado por Vite.
+
+## 🌍 Uso con un solo tunel publico
+
+El flujo recomendado del monorepo usa `ASL-Web/server` como gateway publico unico:
+
+- `ngrok` publica `http://localhost:3001`
+- `ASL-CallAPP/server` sigue escuchando en `http://localhost:3101`
+- el backend web proxya `/calls` y `/api/interpreter/*` hacia `ASL-CallAPP/server`
+
+Eso significa que:
+
+- no hace falta exponer `3101` por separado en el runbook base
+- la app movil y los consumidores remotos deben entrar por el dominio publico del backend web
+- `3101` queda reservado como upstream interno entre servicios locales del monorepo
 
 ## 🛠️ Tecnologias
 
@@ -180,7 +196,7 @@ npm start          # Iniciar backend en modo normal
 `ASL-CallApp` se comunica con:
 
 - **ASL-MobileAPP**: participa en el flujo de llamada iniciado desde la experiencia del huesped
-- **ASL-Web**: reenvia reportes del interprete para seguimiento operativo interno
+- **ASL-Web**: reenvia reportes del interprete para seguimiento operativo interno y puede exponer el call server detras de un solo dominio publico
 
 ### Flujo de Comunicacion
 
