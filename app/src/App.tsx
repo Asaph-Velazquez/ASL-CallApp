@@ -5,6 +5,15 @@ const WS_URL = import.meta.env.VITE_CALL_WS_URL || 'ws://localhost:3101/calls';
 
 type CallState = 'idle' | 'available' | 'incoming' | 'active' | 'report';
 type IncomingCall = { callId: string; roomNumber: string; guestName: string; stayId?: string } | null;
+type MediaState = 'idle' | 'preparing' | 'ready' | 'connecting' | 'connected' | 'error';
+type SignalingMessage = {
+  type: 'WEBRTC_OFFER' | 'WEBRTC_ANSWER' | 'WEBRTC_ICE_CANDIDATE';
+  payload?: {
+    callId?: string;
+    sdp?: RTCSessionDescriptionInit;
+    candidate?: RTCIceCandidateInit;
+  };
+};
 
 type ReportForm = {
   summary: string;
@@ -126,12 +135,77 @@ function WifiIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function MicIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 1 1-6 0V6a3 3 0 0 1 3-3Z" />
+      <path d="M19 10v1a7 7 0 0 1-14 0v-1" />
+      <path d="M12 18v3" />
+      <path d="M8 21h8" />
+    </IconBase>
+  );
+}
+
+function MicOffIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <IconBase {...props}>
+      <path d="m3 3 18 18" />
+      <path d="M9 9v2a3 3 0 0 0 5.1 2.1" />
+      <path d="M15 7V6a3 3 0 0 0-5.7-1.3" />
+      <path d="M19 10v1a7 7 0 0 1-12.7 4" />
+      <path d="M12 18v3" />
+      <path d="M8 21h8" />
+    </IconBase>
+  );
+}
+
+function CameraOffIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <IconBase {...props}>
+      <path d="m3 3 18 18" />
+      <path d="M10.7 6H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h8" />
+      <path d="m16 10 5-3v10l-5-3" />
+      <path d="M16 16.5V8.8" />
+    </IconBase>
+  );
+}
+
 function clsx(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(' ');
 }
 
+function decodeJwtPayload(token: string) {
+  try {
+    const [, payload] = token.split('.');
+    if (!payload) {
+      return null;
+    }
+
+    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+  } catch (_error) {
+    return null;
+  }
+}
+
+function getStoredInterpreterToken() {
+  const storedToken = localStorage.getItem('interpreter_token');
+  if (!storedToken) {
+    return null;
+  }
+
+  const payload = decodeJwtPayload(storedToken);
+  const expiresAt = typeof payload?.exp === 'number' ? payload.exp * 1000 : 0;
+  if (!expiresAt || expiresAt <= Date.now()) {
+    localStorage.removeItem('interpreter_token');
+    localStorage.removeItem('interpreter_profile');
+    return null;
+  }
+
+  return storedToken;
+}
+
 export default function App() {
-  const [token, setToken] = useState<string | null>(localStorage.getItem('interpreter_token'));
+  const [token, setToken] = useState<string | null>(() => getStoredInterpreterToken());
   const [profile, setProfile] = useState<{ userId: string; fullName: string; username: string } | null>(() => {
     const raw = localStorage.getItem('interpreter_profile');
     return raw ? JSON.parse(raw) : null;
@@ -144,43 +218,317 @@ export default function App() {
   const [report, setReport] = useState<ReportForm>(initialReport);
   const [error, setError] = useState('');
   const [statusMessage, setStatusMessage] = useState('Disconnected');
+  const [mediaState, setMediaState] = useState<MediaState>('idle');
+  const [mediaMessage, setMediaMessage] = useState('Local camera and microphone are offline.');
+  const [isMicEnabled, setIsMicEnabled] = useState(true);
+  const [isCameraEnabled, setIsCameraEnabled] = useState(true);
   const wsRef = useRef<WebSocket | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const makingOfferRef = useRef(false);
+  const validatingTokenRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    if (!token) return;
+  function clearSession(nextMessage = 'Disconnected', nextError = '') {
+    localStorage.removeItem('interpreter_token');
+    localStorage.removeItem('interpreter_profile');
+    setToken(null);
+    setProfile(null);
+    setIncomingCall(null);
+    setActiveCallId(null);
+    setError(nextError);
+    resetMediaSession();
+    setCallState('idle');
+    setStatusMessage(nextMessage);
+  }
 
-    const ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
-    wsRef.current = ws;
+  async function handleUnauthorized(message = 'Interpreter session expired. Sign in again.') {
+    clearSession('Disconnected', message);
+  }
 
-    ws.onopen = () => setStatusMessage('Connected to call server');
-    ws.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-      switch (message.type) {
-        case 'CALL_REQUEST':
-          setIncomingCall(message.payload);
-          setActiveCallId(message.payload.callId);
-          setCallState('incoming');
-          setStatusMessage(`Incoming call from room ${message.payload.roomNumber}`);
+  function stopMediaTracks(stream: MediaStream | null) {
+    stream?.getTracks().forEach((track) => track.stop());
+  }
+
+  function attachStream(element: HTMLVideoElement | null, stream: MediaStream | null) {
+    if (element) {
+      element.srcObject = stream;
+    }
+  }
+
+  function resetMediaSession() {
+    makingOfferRef.current = false;
+    peerConnectionRef.current?.close();
+    peerConnectionRef.current = null;
+    stopMediaTracks(localStreamRef.current);
+    localStreamRef.current = null;
+    remoteStreamRef.current = null;
+    attachStream(localVideoRef.current, null);
+    attachStream(remoteVideoRef.current, null);
+    setMediaState('idle');
+    setMediaMessage('Local camera and microphone are offline.');
+    setIsMicEnabled(true);
+    setIsCameraEnabled(true);
+  }
+
+  async function ensurePeerConnection(callId: string) {
+    if (peerConnectionRef.current) {
+      return peerConnectionRef.current;
+    }
+
+    const connection = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    });
+
+    const remoteStream = new MediaStream();
+    remoteStreamRef.current = remoteStream;
+    attachStream(remoteVideoRef.current, remoteStream);
+
+    connection.ontrack = (event) => {
+      event.streams[0]?.getTracks().forEach((track) => remoteStream.addTrack(track));
+      setMediaState('connected');
+      setMediaMessage('Remote guest video is connected.');
+    };
+
+    connection.onicecandidate = (event) => {
+      if (!event.candidate || !activeCallId) {
+        return;
+      }
+      wsRef.current?.send(JSON.stringify({
+        type: 'WEBRTC_ICE_CANDIDATE',
+        payload: { callId: activeCallId, candidate: event.candidate.toJSON() },
+      }));
+    };
+
+    connection.onconnectionstatechange = () => {
+      switch (connection.connectionState) {
+        case 'connected':
+          setMediaState('connected');
+          setMediaMessage('Secure media channel established.');
           break;
-        case 'CALL_ACCEPTED':
-          setCallState('active');
-          setStatusMessage('Call accepted');
+        case 'connecting':
+          setMediaState('connecting');
+          setMediaMessage('Negotiating guest media stream...');
           break;
-        case 'CALL_ENDED':
-          setCallState('report');
-          setStatusMessage('Call ended. Report required.');
+        case 'failed':
+          setMediaState('error');
+          setMediaMessage('Media connection failed. Retry camera or wait for guest reconnection.');
+          break;
+        case 'disconnected':
+          setMediaState('connecting');
+          setMediaMessage('Media disconnected. Waiting for reconnection...');
           break;
         default:
           break;
       }
     };
-    ws.onclose = () => setStatusMessage('Socket closed');
+
+    connection.onnegotiationneeded = async () => {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      try {
+        makingOfferRef.current = true;
+        setMediaState('connecting');
+        setMediaMessage('Sending local offer to guest...');
+        const offer = await connection.createOffer();
+        await connection.setLocalDescription(offer);
+        wsRef.current.send(JSON.stringify({
+          type: 'WEBRTC_OFFER',
+          payload: { callId, sdp: connection.localDescription },
+        }));
+      } catch (_error) {
+        setMediaState('error');
+        setMediaMessage('Unable to create the media offer for this session.');
+      } finally {
+        makingOfferRef.current = false;
+      }
+    };
+
+    peerConnectionRef.current = connection;
+    return connection;
+  }
+
+  async function prepareLocalMedia(callId: string) {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMediaState('error');
+      setMediaMessage('This browser does not support camera and microphone capture.');
+      return;
+    }
+
+    try {
+      setMediaState('preparing');
+      setMediaMessage('Requesting access to camera and microphone...');
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user' },
+        audio: true,
+      });
+
+      stopMediaTracks(localStreamRef.current);
+      localStreamRef.current = stream;
+      attachStream(localVideoRef.current, stream);
+      setIsMicEnabled(stream.getAudioTracks().every((track) => track.enabled));
+      setIsCameraEnabled(stream.getVideoTracks().every((track) => track.enabled));
+
+      const connection = await ensurePeerConnection(callId);
+      const senders = connection.getSenders();
+
+      stream.getTracks().forEach((track) => {
+        const sender = senders.find((entry) => entry.track?.kind === track.kind);
+        if (sender) {
+          sender.replaceTrack(track);
+        } else {
+          connection.addTrack(track, stream);
+        }
+      });
+
+      setMediaState('ready');
+      setMediaMessage('Local preview is live. Waiting for guest media negotiation...');
+    } catch (mediaError) {
+      stopMediaTracks(localStreamRef.current);
+      localStreamRef.current = null;
+      attachStream(localVideoRef.current, null);
+      setMediaState('error');
+      setMediaMessage(mediaError instanceof Error ? mediaError.message : 'Unable to access camera and microphone.');
+    }
+  }
+
+  async function handleSignalMessage(message: SignalingMessage) {
+    const callId = message.payload?.callId;
+    if (!callId || !activeCallId || callId !== activeCallId) {
+      return;
+    }
+
+    const connection = await ensurePeerConnection(callId);
+
+    try {
+      if (message.type === 'WEBRTC_OFFER' && message.payload?.sdp) {
+        await connection.setRemoteDescription(message.payload.sdp);
+        if (!localStreamRef.current) {
+          await prepareLocalMedia(callId);
+        }
+        const answer = await connection.createAnswer();
+        await connection.setLocalDescription(answer);
+        wsRef.current?.send(JSON.stringify({
+          type: 'WEBRTC_ANSWER',
+          payload: { callId, sdp: connection.localDescription },
+        }));
+        setMediaState('connecting');
+        setMediaMessage('Answer sent. Waiting for remote media...');
+      }
+
+      if (message.type === 'WEBRTC_ANSWER' && message.payload?.sdp) {
+        await connection.setRemoteDescription(message.payload.sdp);
+        setMediaState('connecting');
+        setMediaMessage('Remote answer received. Finalizing media connection...');
+      }
+
+      if (message.type === 'WEBRTC_ICE_CANDIDATE' && message.payload?.candidate) {
+        await connection.addIceCandidate(message.payload.candidate);
+      }
+    } catch (_error) {
+      setMediaState('error');
+      setMediaMessage('WebRTC signaling failed for the current call.');
+    }
+  }
+
+  useEffect(() => {
+    if (!token) return;
+    if (validatingTokenRef.current === token) return;
+
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+
+    const verifySessionAndConnect = async () => {
+      validatingTokenRef.current = token;
+      setStatusMessage('Validating interpreter session...');
+
+      const response = await fetch(`${API_URL}/api/interpreter/session`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (cancelled) {
+        return;
+      }
+
+      if (response.status === 401) {
+        await handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        setStatusMessage('Unable to validate interpreter session');
+        return;
+      }
+
+      const data = await response.json();
+      if (cancelled) {
+        return;
+      }
+
+      setProfile(data.interpreter);
+
+      ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
+      wsRef.current = ws;
+
+      ws.onopen = () => setStatusMessage('Connected to call server');
+      ws.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        switch (message.type) {
+          case 'CALL_REQUEST':
+            setIncomingCall(message.payload);
+            setActiveCallId(message.payload.callId);
+            setCallState('incoming');
+            setStatusMessage(`Incoming call from room ${message.payload.roomNumber}`);
+            setMediaState('idle');
+            setMediaMessage('Local camera and microphone are offline.');
+            break;
+          case 'CALL_ACCEPTED':
+            setCallState('active');
+            setStatusMessage('Call accepted');
+            break;
+          case 'CALL_ENDED':
+            setCallState('report');
+            setStatusMessage('Call ended. Report required.');
+            resetMediaSession();
+            break;
+          case 'WEBRTC_OFFER':
+          case 'WEBRTC_ANSWER':
+          case 'WEBRTC_ICE_CANDIDATE':
+            void handleSignalMessage(message);
+            break;
+          default:
+            break;
+        }
+      };
+      ws.onclose = () => setStatusMessage('Socket closed');
+    };
+
+    void verifySessionAndConnect();
 
     return () => {
-      ws.close();
+      cancelled = true;
+      if (validatingTokenRef.current === token) {
+        validatingTokenRef.current = null;
+      }
+      ws?.close();
       wsRef.current = null;
+      resetMediaSession();
     };
   }, [token]);
+
+  useEffect(() => {
+    attachStream(localVideoRef.current, localStreamRef.current);
+  }, [callState]);
+
+  useEffect(() => {
+    attachStream(remoteVideoRef.current, remoteStreamRef.current);
+  }, [callState]);
 
   const canSubmitReport = useMemo(() => {
     if (!report.summary || !report.priority || !report.category) return false;
@@ -190,7 +538,7 @@ export default function App() {
 
   async function updatePresence(availabilityStatus: 'available' | 'offline' | 'busy', currentCallId?: string | null) {
     if (!token) return;
-    await fetch(`${API_URL}/api/interpreter/presence`, {
+    const response = await fetch(`${API_URL}/api/interpreter/presence`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -198,6 +546,15 @@ export default function App() {
       },
       body: JSON.stringify({ availabilityStatus, currentCallId }),
     });
+
+    if (response.status === 401) {
+      await handleUnauthorized();
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error('Unable to update interpreter presence');
+    }
   }
 
   async function handleLogin(event: FormEvent) {
@@ -230,19 +587,26 @@ export default function App() {
   async function handleReject() {
     wsRef.current?.send(JSON.stringify({ type: 'CALL_REJECTED', payload: { callId: activeCallId } }));
     await updatePresence('available');
+    resetMediaSession();
     setIncomingCall(null);
     setActiveCallId(null);
     setCallState('available');
   }
 
   async function handleAccept() {
+    if (!activeCallId) {
+      return;
+    }
+    setError('');
     wsRef.current?.send(JSON.stringify({ type: 'CALL_ACCEPTED', payload: { callId: activeCallId } }));
     await updatePresence('busy', activeCallId);
+    await prepareLocalMedia(activeCallId);
     setCallState('active');
   }
 
   function handleEndCall() {
     wsRef.current?.send(JSON.stringify({ type: 'CALL_ENDED', payload: { callId: activeCallId, reason: 'completed' } }));
+    resetMediaSession();
     setCallState('report');
   }
 
@@ -258,6 +622,12 @@ export default function App() {
       },
       body: JSON.stringify(report),
     });
+
+    if (response.status === 401) {
+      await handleUnauthorized();
+      return;
+    }
+
     const data = await response.json();
     if (!response.ok) {
       setError(data.error || 'Unable to submit report');
@@ -268,19 +638,32 @@ export default function App() {
     setIncomingCall(null);
     setActiveCallId(null);
     setReport(initialReport);
+    resetMediaSession();
     setCallState('available');
     setStatusMessage('Report submitted to ASL-Web');
   }
 
   function handleLogout() {
-    localStorage.removeItem('interpreter_token');
-    localStorage.removeItem('interpreter_profile');
-    setToken(null);
-    setProfile(null);
-    setIncomingCall(null);
-    setActiveCallId(null);
-    setCallState('idle');
-    setStatusMessage('Disconnected');
+    clearSession('Disconnected');
+  }
+
+  function toggleTrack(kind: 'audio' | 'video') {
+    const stream = localStreamRef.current;
+    if (!stream) {
+      return;
+    }
+
+    const tracks = kind === 'audio' ? stream.getAudioTracks() : stream.getVideoTracks();
+    const nextEnabled = !tracks.every((track) => track.enabled);
+    tracks.forEach((track) => {
+      track.enabled = nextEnabled;
+    });
+
+    if (kind === 'audio') {
+      setIsMicEnabled(nextEnabled);
+    } else {
+      setIsCameraEnabled(nextEnabled);
+    }
   }
 
   const priorityTone = priorityConfig[report.priority].tone;
@@ -431,10 +814,24 @@ export default function App() {
             copy={`Browser signaling is connected for room ${incomingCall.roomNumber}. Keep this console open during the session.`}
             tone="purple"
             actions={
-              <button onClick={handleEndCall} className="danger-button">
-                <PhoneOffIcon className="icon-sm" />
-                Finish call
-              </button>
+              <div className="action-row">
+                <button type="button" onClick={() => toggleTrack('audio')} className="ghost-button">
+                  {isMicEnabled ? <MicIcon className="icon-sm" /> : <MicOffIcon className="icon-sm" />}
+                  {isMicEnabled ? 'Mute mic' : 'Unmute mic'}
+                </button>
+                <button type="button" onClick={() => toggleTrack('video')} className="ghost-button">
+                  {isCameraEnabled ? <VideoIcon className="icon-sm" /> : <CameraOffIcon className="icon-sm" />}
+                  {isCameraEnabled ? 'Stop camera' : 'Start camera'}
+                </button>
+                <button type="button" onClick={() => activeCallId && prepareLocalMedia(activeCallId)} className="ghost-button">
+                  <WifiIcon className="icon-sm" />
+                  Retry media
+                </button>
+                <button onClick={handleEndCall} className="danger-button">
+                  <PhoneOffIcon className="icon-sm" />
+                  Finish call
+                </button>
+              </div>
             }
           >
             <div className="live-session-card">
@@ -447,7 +844,54 @@ export default function App() {
                   <p>Room {incomingCall.roomNumber}</p>
                 </div>
               </div>
-              <div className="info-badge tone-purple">Live interpreting in progress</div>
+              <div className={clsx('info-badge', mediaState === 'connected' ? 'tone-green' : mediaState === 'error' ? 'tone-red' : 'tone-purple')}>
+                <VideoIcon className="icon-sm" />
+                {mediaMessage}
+              </div>
+            </div>
+
+            <div className="media-grid">
+              <article className="media-card">
+                <div className="media-card-header">
+                  <div>
+                    <span className="section-kicker text-purple">Interpreter</span>
+                    <h3>Local preview</h3>
+                  </div>
+                  <span className={clsx('info-badge', isCameraEnabled ? 'tone-green' : 'tone-amber')}>
+                    {isCameraEnabled ? 'Camera live' : 'Camera paused'}
+                  </span>
+                </div>
+                <div className="video-frame">
+                  <video ref={localVideoRef} className="video-surface" autoPlay muted playsInline />
+                  {!localStreamRef.current && (
+                    <div className="video-placeholder">
+                      <VideoIcon className="icon-md" />
+                      <p>No local media stream</p>
+                    </div>
+                  )}
+                </div>
+              </article>
+
+              <article className="media-card">
+                <div className="media-card-header">
+                  <div>
+                    <span className="section-kicker text-blue">Guest</span>
+                    <h3>Remote video</h3>
+                  </div>
+                  <span className={clsx('info-badge', mediaState === 'connected' ? 'tone-green' : mediaState === 'error' ? 'tone-red' : 'tone-blue')}>
+                    {mediaState}
+                  </span>
+                </div>
+                <div className="video-frame">
+                  <video ref={remoteVideoRef} className="video-surface" autoPlay playsInline />
+                  {mediaState !== 'connected' && (
+                    <div className="video-placeholder">
+                      <WifiIcon className="icon-md" />
+                      <p>{mediaMessage}</p>
+                    </div>
+                  )}
+                </div>
+              </article>
             </div>
           </StatePanel>
         )}
