@@ -178,7 +178,7 @@ textarea {
   border-radius: inherit;
   object-fit: contain;
   padding: 8px;
-  background: #fff;
+  background: transparent;
 }
 
 .eyebrow,
