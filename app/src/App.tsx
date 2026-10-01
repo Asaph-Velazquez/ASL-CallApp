@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, SVGProps, useEffect, useMemo, useRef, useState } from 'react';
 import CameraOptions from './CameraOptions';
 import { replaceCamera } from './camera';
+import hotelLogoUrl from '../assets/Logo/Hotel logo.png';
 
 const API_URL = import.meta.env.VITE_CALL_API_URL || 'http://localhost:3101';
 const WS_URL = import.meta.env.VITE_CALL_WS_URL || 'ws://localhost:3101/calls';
@@ -244,6 +245,13 @@ export default function App() {
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const makingOfferRef = useRef(false);
   const validatingTokenRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]') || document.createElement('link');
+    favicon.rel = 'icon';
+    favicon.href = hotelLogoUrl;
+    document.head.appendChild(favicon);
+  }, []);
 
   function clearSession(nextMessage = 'Disconnected', nextError = '') {
     activeCallIdRef.current = null;
@@ -868,7 +876,7 @@ export default function App() {
           <div className="hero-topbar">
             <div className="brand-lockup">
               <div className="brand-icon">
-                <HandIcon className="icon-xl" />
+                <img src={hotelLogoUrl} alt="Hotel logo" className="brand-logo" />
               </div>
               <div>
                 <p className="eyebrow">ASL CallAPP</p>

@@ -172,6 +172,15 @@ textarea {
   box-shadow: var(--shadow-soft);
 }
 
+.brand-logo {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: contain;
+  padding: 8px;
+  background: #fff;
+}
+
 .eyebrow,
 .section-kicker {
   margin: 0;
