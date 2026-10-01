@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import express from 'express';
 import cors from 'cors';
 import { config } from 'dotenv';
@@ -6,7 +5,8 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
-import { CallSession, InterpreterPresence, InterpreterReport, InterpreterUser } from './models/index.js';
+import { CallSession, InterpreterPresence, InterpreterReport } from './models/index.js';
+import { createInterpreterAuth, createLoginLimiter } from './interpreterAuth.js';
 
 config();
 
@@ -18,6 +18,7 @@ const INTERPRETER_JWT_SECRET = process.env.INTERPRETER_JWT_SECRET || 'interprete
 const ASL_WEB_API_URL = process.env.ASL_WEB_API_URL || 'http://localhost:3001';
 const CALL_INTERNAL_TOKEN = process.env.CALL_INTERNAL_TOKEN || '';
 const REPORT_FORWARD_TIMEOUT_MS = Number(process.env.REPORT_FORWARD_TIMEOUT_MS || 8000);
+const interpreterAuth = createInterpreterAuth({ hotelUrl: ASL_WEB_API_URL, internalToken: CALL_INTERNAL_TOKEN, secret: INTERPRETER_JWT_SECRET });
 const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:5174',
@@ -73,6 +74,7 @@ app.use(cors({
   },
   credentials: true,
 }));
+app.use('/api/calls/:callId/report', express.json({ limit: '64kb' }));
 app.use(express.json({ limit: '25kb' }));
 
 function send(socket, payload) {
@@ -93,40 +95,17 @@ function buildForwardHeaders() {
   return headers;
 }
 
-async function ensureDefaultInterpreter() {
-  const username = process.env.INTERPRETER_DEFAULT_USERNAME || 'interpreter';
-  const password = process.env.INTERPRETER_DEFAULT_PASSWORD || 'hotel2026';
-  const fullName = process.env.INTERPRETER_DEFAULT_FULL_NAME || 'Hotel Interpreter';
-  const existing = await InterpreterUser.findOne({ username });
-  if (!existing) {
-    await new InterpreterUser({ username, password, fullName }).save();
-  }
-}
-
-function issueInterpreterToken(user) {
-  return jwt.sign(
-    {
-      userId: String(user._id),
-      username: user.username,
-      fullName: user.fullName,
-      role: 'interpreter',
-    },
-    INTERPRETER_JWT_SECRET,
-    { expiresIn: '8h' }
-  );
-}
-
-function verifyInterpreterHttp(req, res, next) {
+async function verifyInterpreterHttp(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Interpreter token required' });
   }
 
   try {
-    req.user = jwt.verify(authHeader.slice(7), INTERPRETER_JWT_SECRET);
+    req.user = await interpreterAuth.validate(authHeader.slice(7));
     next();
-  } catch (_error) {
-    return res.status(401).json({ error: 'Invalid interpreter token' });
+  } catch (error) {
+    return res.status(error.status || 503).json({ error: error.message });
   }
 }
 
@@ -135,6 +114,48 @@ const wss = new WebSocketServer({ noServer: true });
 const socketMeta = new WeakMap();
 const interpreterSockets = new Map();
 const callPeers = new Map();
+
+async function revokeInterpreter(socket, error) {
+  const meta = socketMeta.get(socket);
+  if (!meta || meta.revoked) return;
+  meta.revoked = true;
+  if (interpreterSockets.get(meta.userId) === socket) interpreterSockets.delete(meta.userId);
+  const unavailable = error.status === 503;
+  send(socket, { type: unavailable ? 'AUTH_UNAVAILABLE' : 'AUTH_REVOKED', payload: { message: error.message } });
+  socket.close(unavailable ? 1013 : 1008, unavailable ? 'Hotel authentication unavailable' : 'Interpreter access revoked');
+  // Notify the guest immediately, even if persistence is temporarily unavailable.
+  for (const [callId, peers] of callPeers) {
+    if (peers.interpreterSocket !== socket) continue;
+    send(peers.guestSocket, { type: 'CALL_ENDED', payload: { callId, endReason: 'interpreter_access_revoked' } });
+    try { await finalizeCall(callId, unavailable ? 'authentication_unavailable' : 'interpreter_access_revoked'); }
+    catch { callPeers.delete(callId); }
+  }
+  await setInterpreterPresence(meta.userId, meta.fullName, 'offline', null).catch(() => {});
+}
+
+async function validateInterpreterSocket(socket) {
+  const meta = socketMeta.get(socket);
+  if (!meta || meta.revoked || socket.readyState !== 1) return false;
+  if (meta.validation) return meta.validation;
+  meta.validation = (async () => {
+    try {
+      const user = await interpreterAuth.validate(meta.token);
+      if (meta.revoked || socket.readyState !== 1) return false;
+      Object.assign(meta, user);
+      return true;
+    } catch (error) {
+      await revokeInterpreter(socket, error);
+      return false;
+    } finally { meta.validation = null; }
+  })();
+  return meta.validation;
+}
+
+setInterval(() => {
+  for (const socket of wss.clients) {
+    if (socketMeta.get(socket)?.clientType === 'interpreter') void validateInterpreterSocket(socket);
+  }
+}, 20000).unref();
 
 async function setInterpreterPresence(interpreterId, displayName, availabilityStatus, currentCallId = null) {
   return InterpreterPresence.findOneAndUpdate(
@@ -178,7 +199,7 @@ async function reserveAvailableInterpreter(callId) {
     }
 
     const socket = interpreterSockets.get(presence.interpreterId);
-    if (socket?.readyState === 1) {
+    if (socket?.readyState === 1 && await validateInterpreterSocket(socket)) {
       return { presence, socket };
     }
 
@@ -208,19 +229,21 @@ async function finalizeCall(callId, endReason, status = 'completed') {
         ? { userId: existingSession.interpreterId, fullName: existingSession.interpreterName }
         : null;
 
+  const reportRequired = Boolean(existingSession?.interpreterId && existingSession.reportForwardStatus !== 'forwarded');
   if (interpreterMeta?.userId) {
-    await releaseInterpreter(interpreterMeta, 'available');
+    const otherPending = await pendingReportFor(interpreterMeta.userId);
+    await releaseInterpreter(interpreterMeta, reportRequired || otherPending ? 'busy' : 'available');
   }
 
   const session = await markCallSession(callId, {
     status,
-    endedAt: new Date(),
+    endedAt: existingSession?.endedAt || new Date(),
     endReason,
   });
 
   if (peers) {
     send(peers.guestSocket, { type: 'CALL_ENDED', payload: { callId, endReason, status } });
-    send(peers.interpreterSocket, { type: 'CALL_ENDED', payload: { callId, endReason, status } });
+    send(peers.interpreterSocket, { type: 'CALL_ENDED', payload: { callId, endReason, status, reportRequired } });
     callPeers.delete(callId);
   }
 
@@ -267,46 +290,49 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-app.post('/api/interpreter/login', async (req, res) => {
+app.post('/api/interpreter/login', createLoginLimiter(), async (req, res) => {
   try {
-    const username = String(req.body?.username || '').trim();
-    const password = String(req.body?.password || '');
-    const interpreter = await InterpreterUser.findOne({ username });
-    if (!interpreter) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    const valid = await interpreter.comparePassword(password);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
+    const interpreter = await interpreterAuth.login({ username: req.body?.username, password: req.body?.password });
     return res.json({
-      token: issueInterpreterToken(interpreter),
-      interpreter: {
-        userId: String(interpreter._id),
-        username: interpreter.username,
-        fullName: interpreter.fullName,
-      },
+      token: interpreterAuth.issue(interpreter),
+      interpreter,
     });
-  } catch (_error) {
-    return res.status(500).json({ error: 'Login failed' });
+  } catch (error) {
+    return res.status(error.status || 503).json({ error: error.message });
   }
 });
 
-app.get('/api/interpreter/session', verifyInterpreterHttp, (req, res) => {
-  return res.json({
-    interpreter: {
-      userId: req.user.userId,
-      username: req.user.username,
-      fullName: req.user.fullName,
-    },
-  });
+async function pendingReportFor(interpreterId) {
+  const session = await CallSession.findOne({ interpreterId, status: 'completed', reportForwardStatus: { $ne: 'forwarded' } })
+    .sort({ endedAt: 1 }).lean();
+  if (!session) return null;
+  const report = await InterpreterReport.findOne({ callId: session.callId }).sort({ submittedAt: 1 }).lean();
+  return { callId: session.callId, roomNumber: session.roomNumber, guestName: session.guestName, report };
+}
+
+app.get('/api/interpreter/session', verifyInterpreterHttp, async (req, res) => {
+  try {
+    const pendingCall = await pendingReportFor(req.user.userId);
+    if (pendingCall) await setInterpreterPresence(req.user.userId, req.user.fullName, 'busy', pendingCall.callId);
+    return res.json({
+      pendingCall,
+      interpreter: {
+        userId: req.user.userId,
+        username: req.user.username,
+        fullName: req.user.fullName,
+      },
+    });
+  } catch {
+    return res.status(503).json({ error: 'Unable to recover pending reports' });
+  }
 });
 
 app.post('/api/interpreter/presence', verifyInterpreterHttp, async (req, res) => {
   try {
     const status = ['available', 'offline', 'busy'].includes(req.body?.availabilityStatus) ? req.body.availabilityStatus : 'offline';
+    if (status === 'available' && await pendingReportFor(req.user.userId)) {
+      return res.status(409).json({ error: 'Submit the pending interpreter report before receiving another call' });
+    }
     const presence = await setInterpreterPresence(
       req.user.userId,
       req.user.fullName,
@@ -326,11 +352,11 @@ app.post('/api/calls/:callId/report', verifyInterpreterHttp, async (req, res) =>
       return res.status(404).json({ error: 'Call not found' });
     }
 
-    if (session.interpreterId && session.interpreterId !== req.user.userId) {
+    if (session.interpreterId !== req.user.userId) {
       return res.status(403).json({ error: 'Interpreter does not own this call' });
     }
 
-    if (!['active', 'completed'].includes(session.status)) {
+    if (session.status !== 'completed') {
       return res.status(409).json({ error: 'Call is not ready for report submission' });
     }
 
@@ -340,12 +366,13 @@ app.post('/api/calls/:callId/report', verifyInterpreterHttp, async (req, res) =>
     const notes = String(req.body?.notes || '').trim();
     const followUpRequired = typeof req.body?.followUpRequired === 'boolean' ? req.body.followUpRequired : true;
 
-    if (!summary || !priority || !category || (followUpRequired && !notes)) {
+    if (!summary || !['low', 'medium', 'high', 'urgent'].includes(priority) || !category || (followUpRequired && !notes)
+        || summary.length > 4000 || category.length > 120 || notes.length > 8000) {
       return res.status(400).json({ error: 'Missing required report fields' });
     }
 
     const reportPayload = {
-      reportId: `report-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+      reportId: `report-${session.callId}`,
       callId: req.params.callId,
       stayId: session.stayId,
       roomNumber: session.roomNumber,
@@ -360,11 +387,24 @@ app.post('/api/calls/:callId/report', verifyInterpreterHttp, async (req, res) =>
       submittedAt: new Date(),
     };
 
-    const report = await InterpreterReport.create(reportPayload);
+    // Preserve the first saved payload and its identity on retries, including
+    // legacy reports that used random IDs. A timeout must not create duplicates.
+    const existing = await InterpreterReport.findOne({ callId: session.callId }).sort({ submittedAt: 1 });
+    let report = existing;
+    if (!report) {
+      try {
+        report = await InterpreterReport.findOneAndUpdate({ reportId: reportPayload.reportId },
+          { $setOnInsert: reportPayload }, { upsert: true, new: true, runValidators: true });
+      } catch (error) {
+        if (error.code !== 11000) throw error;
+        report = await InterpreterReport.findOne({ reportId: reportPayload.reportId });
+      }
+    }
+    const savedPayload = report.toObject();
     const now = new Date();
 
     try {
-      const forwarded = await forwardReportToAslWeb(reportPayload);
+      const forwarded = await forwardReportToAslWeb(savedPayload);
 
       await InterpreterReport.updateOne(
         { reportId: report.reportId },
@@ -380,8 +420,8 @@ app.post('/api/calls/:callId/report', verifyInterpreterHttp, async (req, res) =>
 
       await markCallSession(req.params.callId, {
         status: 'completed',
-        endedAt: now,
-        endReason: followUpRequired ? 'specialized_followup_required' : 'completed',
+        endedAt: session.endedAt || now,
+        endReason: report.followUpRequired ? 'specialized_followup_required' : 'completed',
         reportForwardStatus: 'forwarded',
         reportForwardedAt: now,
         reportForwardError: null,
@@ -389,11 +429,16 @@ app.post('/api/calls/:callId/report', verifyInterpreterHttp, async (req, res) =>
         interpreterName: req.user.fullName,
       });
 
-      const peers = callPeers.get(req.params.callId);
-      if (peers) {
-        peers.interpreterMeta = { userId: req.user.userId, fullName: req.user.fullName };
-      }
-      await finalizeCall(req.params.callId, followUpRequired ? 'specialized_followup_required' : 'completed', 'completed');
+      const pendingCall = await pendingReportFor(req.user.userId);
+      // A delayed duplicate receipt must not release a different, newer call.
+      await InterpreterPresence.updateOne({
+        interpreterId: req.user.userId,
+        $or: [{ currentCallId: null }, { currentCallId: session.callId }],
+      }, { $set: {
+        availabilityStatus: pendingCall ? 'busy' : 'available',
+        currentCallId: pendingCall?.callId || null,
+        lastSeenAt: now,
+      } });
 
       return res.status(201).json({
         report: {
@@ -404,12 +449,13 @@ app.post('/api/calls/:callId/report', verifyInterpreterHttp, async (req, res) =>
           forwardError: null,
         },
         forwarded,
+        pendingCall,
       });
     } catch (error) {
       const forwardError = truncateError(error instanceof Error ? error.message : error);
 
       await InterpreterReport.updateOne(
-        { reportId: report.reportId },
+        { reportId: report.reportId, forwardedToAslWeb: { $ne: true } },
         {
           $set: {
             forwardedToAslWeb: false,
@@ -420,17 +466,15 @@ app.post('/api/calls/:callId/report', verifyInterpreterHttp, async (req, res) =>
         }
       );
 
-      await markCallSession(req.params.callId, {
-        reportForwardStatus: 'failed',
-        reportForwardError: forwardError,
-        interpreterId: req.user.userId,
-        interpreterName: req.user.fullName,
+      await CallSession.updateOne({ callId: session.callId, reportForwardStatus: { $ne: 'forwarded' } }, {
+        $set: { reportForwardStatus: 'failed', reportForwardError: forwardError },
       });
 
       return res.status(502).json({
         error: 'Report stored locally but forwarding to ASL-Web failed',
         details: forwardError,
         reportId: report.reportId,
+        report: report.toObject(),
       });
     }
   } catch (error) {
@@ -445,14 +489,21 @@ wss.on('connection', (socket) => {
   }
 
   socket.on('message', async (raw) => {
+    const currentMeta = socketMeta.get(socket);
+    let message;
+    let reservation = null;
+    let ownsRequest = false;
     try {
-      const message = JSON.parse(raw.toString());
-      const currentMeta = socketMeta.get(socket);
+      message = JSON.parse(raw.toString());
       if (!currentMeta) {
         return;
       }
+      if (currentMeta.clientType === 'interpreter' && !await validateInterpreterSocket(socket)) return;
 
       if (currentMeta.clientType === 'guest' && message.type === 'CALL_REQUEST') {
+        if (currentMeta.requestPending) return;
+        currentMeta.requestPending = true;
+        ownsRequest = true;
         const existingPeers = callPeers.get(currentMeta.callId);
         if (existingPeers?.guestSocket === socket) {
           send(socket, { type: 'CALL_PENDING', payload: { callId: currentMeta.callId } });
@@ -460,6 +511,7 @@ wss.on('connection', (socket) => {
         }
 
         const available = await reserveAvailableInterpreter(currentMeta.callId);
+        reservation = available;
         const now = new Date();
 
         await CallSession.findOneAndUpdate(
@@ -467,9 +519,6 @@ wss.on('connection', (socket) => {
           {
             $setOnInsert: {
               callId: currentMeta.callId,
-              stayId: currentMeta.stayId,
-              roomNumber: currentMeta.roomNumber,
-              guestName: currentMeta.guestName,
               requestedAt: now,
             },
             $set: {
@@ -570,19 +619,44 @@ wss.on('connection', (socket) => {
       }
 
       if (message.type === 'CALL_ENDED') {
+        const peers = callPeers.get(message.payload?.callId);
+        if (!peers || (peers.guestSocket !== socket && peers.interpreterSocket !== socket)) return;
         await finalizeCall(message.payload?.callId, message.payload?.reason || 'completed', 'completed');
       }
-    } catch (_error) {
+    } catch (error) {
+      // Never leave a guest waiting without an acknowledgement or strand the
+      // interpreter in busy when persistence fails before delivering the call.
+      if (reservation && !callPeers.has(currentMeta.callId)) {
+        try {
+          await InterpreterPresence.updateOne(
+            { interpreterId: reservation.presence.interpreterId, currentCallId: currentMeta.callId },
+            { $set: { availabilityStatus: reservation.socket.readyState === 1 ? 'available' : 'offline',
+              currentCallId: null, lastSeenAt: new Date() } }
+          );
+        } catch (releaseError) {
+          console.error('CALL_RESERVATION_RELEASE_FAILED', { callId: currentMeta.callId, error: releaseError.name });
+        }
+      }
+      console.error('CALL_MESSAGE_FAILED', {
+        type: message?.type, callId: currentMeta?.callId || message?.payload?.callId,
+        error: error.name, code: error.code,
+      });
+      send(socket, { type: 'CALL_ERROR', payload: {
+        callId: currentMeta?.callId || message?.payload?.callId,
+        reason: 'call_processing_failed',
+      } });
+    } finally {
+      if (ownsRequest) currentMeta.requestPending = false;
     }
   });
 
   socket.on('close', async () => {
     const currentMeta = socketMeta.get(socket);
-    if (!currentMeta) {
+    if (!currentMeta || currentMeta.revoked) {
       return;
     }
 
-    if (currentMeta.clientType === 'interpreter') {
+    if (currentMeta.clientType === 'interpreter' && interpreterSockets.get(currentMeta.userId) === socket) {
       interpreterSockets.delete(currentMeta.userId);
       const activePeer = [...callPeers.values()].find((entry) => entry.interpreterSocket === socket);
       const nextStatus = activePeer ? 'busy' : 'offline';
@@ -597,7 +671,7 @@ wss.on('connection', (socket) => {
   });
 });
 
-server.on('upgrade', (request, socket, head) => {
+server.on('upgrade', async (request, socket, head) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host}`);
     if (url.pathname !== '/calls') {
@@ -630,15 +704,16 @@ server.on('upgrade', (request, socket, head) => {
 
     if (!meta) {
       try {
-        const interpreterDecoded = jwt.verify(token, INTERPRETER_JWT_SECRET);
+        const interpreterDecoded = await interpreterAuth.validate(token);
         meta = {
           clientType: 'interpreter',
+          token,
           userId: interpreterDecoded.userId,
           username: interpreterDecoded.username,
           fullName: interpreterDecoded.fullName,
         };
-      } catch (_error) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      } catch (error) {
+        socket.write(error.status === 503 ? 'HTTP/1.1 503 Service Unavailable\r\n\r\n' : 'HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
       }
@@ -658,7 +733,6 @@ async function start() {
   try {
     await mongoose.connect(MONGODB_URI);
     console.log('ASL-CallAPP MongoDB connected');
-    await ensureDefaultInterpreter();
 
     server.listen(PORT, () => {
       console.log(`ASL-CallAPP server running on http://localhost:${PORT}`);

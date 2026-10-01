@@ -1,4 +1,6 @@
 import { FormEvent, ReactNode, SVGProps, useEffect, useMemo, useRef, useState } from 'react';
+import CameraOptions from './CameraOptions';
+import { replaceCamera } from './camera';
 
 const API_URL = import.meta.env.VITE_CALL_API_URL || 'http://localhost:3101';
 const WS_URL = import.meta.env.VITE_CALL_WS_URL || 'ws://localhost:3101/calls';
@@ -216,13 +218,25 @@ export default function App() {
   const [incomingCall, setIncomingCall] = useState<IncomingCall>(null);
   const [activeCallId, setActiveCallId] = useState<string | null>(null);
   const [report, setReport] = useState<ReportForm>(initialReport);
+  const [reportStored, setReportStored] = useState(false);
+  const [submittingReport, setSubmittingReport] = useState(false);
+  const submittingReportRef = useRef(false);
+  const [cameraId, setCameraId] = useState('');
+  const cameraIdRef = useRef('');
+  const [switchingCamera, setSwitchingCamera] = useState(false);
+  const switchingCameraRef = useRef(false);
   const [error, setError] = useState('');
   const [statusMessage, setStatusMessage] = useState('Disconnected');
   const [mediaState, setMediaState] = useState<MediaState>('idle');
+  const [remotePlaybackBlocked, setRemotePlaybackBlocked] = useState(false);
   const [mediaMessage, setMediaMessage] = useState('Local camera and microphone are offline.');
   const [isMicEnabled, setIsMicEnabled] = useState(true);
   const [isCameraEnabled, setIsCameraEnabled] = useState(true);
   const wsRef = useRef<WebSocket | null>(null);
+  const activeCallIdRef = useRef<string | null>(null);
+  const mediaGenerationRef = useRef(0);
+  const mediaPendingRef = useRef<Promise<void> | null>(null);
+  const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
@@ -232,6 +246,9 @@ export default function App() {
   const validatingTokenRef = useRef<string | null>(null);
 
   function clearSession(nextMessage = 'Disconnected', nextError = '') {
+    activeCallIdRef.current = null;
+    wsRef.current?.close();
+    wsRef.current = null;
     localStorage.removeItem('interpreter_token');
     localStorage.removeItem('interpreter_profile');
     setToken(null);
@@ -254,11 +271,31 @@ export default function App() {
 
   function attachStream(element: HTMLVideoElement | null, stream: MediaStream | null) {
     if (element) {
-      element.srcObject = stream;
+      if (element.srcObject !== stream) element.srcObject = stream;
+    }
+  }
+
+  async function playRemoteMedia() {
+    const element = remoteVideoRef.current;
+    const stream = remoteStreamRef.current;
+    if (!element || !stream || !stream.getTracks().length) return;
+    const generation = mediaGenerationRef.current;
+    attachStream(element, stream);
+    element.muted = false;
+    try {
+      await element.play();
+      if (generation === mediaGenerationRef.current) setRemotePlaybackBlocked(false);
+    } catch (cause) {
+      if (generation !== mediaGenerationRef.current) return;
+      if (cause instanceof Error && cause.name === 'NotAllowedError') setRemotePlaybackBlocked(true);
     }
   }
 
   function resetMediaSession() {
+    setRemotePlaybackBlocked(false);
+    mediaGenerationRef.current += 1;
+    mediaPendingRef.current = null;
+    pendingIceRef.current = [];
     makingOfferRef.current = false;
     peerConnectionRef.current?.close();
     peerConnectionRef.current = null;
@@ -287,18 +324,22 @@ export default function App() {
     attachStream(remoteVideoRef.current, remoteStream);
 
     connection.ontrack = (event) => {
-      event.streams[0]?.getTracks().forEach((track) => remoteStream.addTrack(track));
+      const tracks = [event.track, ...event.streams.flatMap(stream => stream.getTracks())];
+      tracks.forEach((track) => {
+        if (!remoteStream.getTrackById(track.id)) remoteStream.addTrack(track);
+      });
+      void playRemoteMedia();
       setMediaState('connected');
-      setMediaMessage('Remote guest video is connected.');
+      setMediaMessage(remoteStream.getVideoTracks().length ? 'Guest video track received.' : 'Guest audio track received. Waiting for video...');
     };
 
     connection.onicecandidate = (event) => {
-      if (!event.candidate || !activeCallId) {
+      if (!event.candidate || activeCallIdRef.current !== callId || wsRef.current?.readyState !== WebSocket.OPEN) {
         return;
       }
       wsRef.current?.send(JSON.stringify({
         type: 'WEBRTC_ICE_CANDIDATE',
-        payload: { callId: activeCallId, candidate: event.candidate.toJSON() },
+        payload: { callId, candidate: event.candidate.toJSON() },
       }));
     };
 
@@ -326,7 +367,8 @@ export default function App() {
     };
 
     connection.onnegotiationneeded = async () => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN ||
+          activeCallIdRef.current !== callId || connection.signalingState !== 'stable') {
         return;
       }
       try {
@@ -351,10 +393,23 @@ export default function App() {
     return connection;
   }
 
-  async function prepareLocalMedia(callId: string) {
+  function prepareLocalMedia(callId: string): Promise<void> {
+    if (mediaPendingRef.current) return mediaPendingRef.current;
+    const pending = captureLocalMedia(callId);
+    mediaPendingRef.current = pending;
+    void pending.finally(() => {
+      if (mediaPendingRef.current === pending) mediaPendingRef.current = null;
+    });
+    return pending;
+  }
+
+  async function captureLocalMedia(callId: string) {
+    const generation = mediaGenerationRef.current;
     if (!navigator.mediaDevices?.getUserMedia) {
       setMediaState('error');
-      setMediaMessage('This browser does not support camera and microphone capture.');
+      setMediaMessage(window.isSecureContext
+        ? 'This browser does not support camera and microphone capture.'
+        : 'Camera access requires HTTPS or http://localhost. Open the console using a secure address.');
       return;
     }
 
@@ -363,12 +418,19 @@ export default function App() {
       setMediaMessage('Requesting access to camera and microphone...');
 
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' },
+        video: cameraIdRef.current ? { deviceId: { exact: cameraIdRef.current } } : { facingMode: 'user' },
         audio: true,
       });
 
+      if (generation !== mediaGenerationRef.current || activeCallIdRef.current !== callId) {
+        stopMediaTracks(stream);
+        return;
+      }
       stopMediaTracks(localStreamRef.current);
       localStreamRef.current = stream;
+      const actualCamera = stream.getVideoTracks()[0]?.getSettings?.().deviceId || '';
+      cameraIdRef.current = actualCamera;
+      setCameraId(actualCamera);
       attachStream(localVideoRef.current, stream);
       setIsMicEnabled(stream.getAudioTracks().every((track) => track.enabled));
       setIsCameraEnabled(stream.getVideoTracks().every((track) => track.enabled));
@@ -376,29 +438,38 @@ export default function App() {
       const connection = await ensurePeerConnection(callId);
       const senders = connection.getSenders();
 
-      stream.getTracks().forEach((track) => {
+      await Promise.all(stream.getTracks().map(async (track) => {
         const sender = senders.find((entry) => entry.track?.kind === track.kind);
         if (sender) {
-          sender.replaceTrack(track);
+          await sender.replaceTrack(track);
         } else {
           connection.addTrack(track, stream);
         }
-      });
+      }));
 
       setMediaState('ready');
       setMediaMessage('Local preview is live. Waiting for guest media negotiation...');
     } catch (mediaError) {
+      if (generation !== mediaGenerationRef.current) return;
       stopMediaTracks(localStreamRef.current);
       localStreamRef.current = null;
       attachStream(localVideoRef.current, null);
       setMediaState('error');
-      setMediaMessage(mediaError instanceof Error ? mediaError.message : 'Unable to access camera and microphone.');
+      const name = mediaError instanceof Error ? mediaError.name : '';
+      setMediaMessage(name === 'NotAllowedError'
+        ? 'Allow camera and microphone access in the browser site settings, then retry media.'
+        : name === 'NotFoundError'
+          ? 'No camera or microphone was found. Connect both devices and retry media.'
+          : name === 'NotReadableError'
+            ? 'Camera or microphone is unavailable. Close other apps using it and retry media.'
+            : mediaError instanceof Error ? mediaError.message : 'Unable to access camera and microphone.');
     }
   }
 
   async function handleSignalMessage(message: SignalingMessage) {
+    const generation = mediaGenerationRef.current;
     const callId = message.payload?.callId;
-    if (!callId || !activeCallId || callId !== activeCallId) {
+    if (!callId || callId !== activeCallIdRef.current) {
       return;
     }
 
@@ -407,9 +478,11 @@ export default function App() {
     try {
       if (message.type === 'WEBRTC_OFFER' && message.payload?.sdp) {
         await connection.setRemoteDescription(message.payload.sdp);
+        for (const candidate of pendingIceRef.current.splice(0)) await connection.addIceCandidate(candidate);
         if (!localStreamRef.current) {
           await prepareLocalMedia(callId);
         }
+        if (generation !== mediaGenerationRef.current || callId !== activeCallIdRef.current) return;
         const answer = await connection.createAnswer();
         await connection.setLocalDescription(answer);
         wsRef.current?.send(JSON.stringify({
@@ -422,17 +495,61 @@ export default function App() {
 
       if (message.type === 'WEBRTC_ANSWER' && message.payload?.sdp) {
         await connection.setRemoteDescription(message.payload.sdp);
+        for (const candidate of pendingIceRef.current.splice(0)) await connection.addIceCandidate(candidate);
         setMediaState('connecting');
         setMediaMessage('Remote answer received. Finalizing media connection...');
       }
 
       if (message.type === 'WEBRTC_ICE_CANDIDATE' && message.payload?.candidate) {
-        await connection.addIceCandidate(message.payload.candidate);
+        if (connection.remoteDescription) {
+          await connection.addIceCandidate(message.payload.candidate);
+        } else {
+          pendingIceRef.current.push(message.payload.candidate);
+        }
       }
     } catch (_error) {
+      if (generation !== mediaGenerationRef.current) return;
       setMediaState('error');
       setMediaMessage('WebRTC signaling failed for the current call.');
     }
+  }
+
+  async function selectCamera(deviceId: string) {
+    if (switchingCameraRef.current || mediaPendingRef.current) return;
+    if (!localStreamRef.current) {
+      cameraIdRef.current = deviceId;
+      setCameraId(deviceId);
+      if (activeCallIdRef.current) await prepareLocalMedia(activeCallIdRef.current);
+      return;
+    }
+    switchingCameraRef.current = true;
+    setSwitchingCamera(true);
+    const generation = mediaGenerationRef.current;
+    const stream = localStreamRef.current;
+    try {
+      await replaceCamera(navigator.mediaDevices, stream, peerConnectionRef.current, deviceId,
+        () => generation === mediaGenerationRef.current && localStreamRef.current === stream);
+      if (generation !== mediaGenerationRef.current) return;
+      cameraIdRef.current = deviceId;
+      setCameraId(deviceId);
+      attachStream(localVideoRef.current, stream);
+      setMediaMessage('Camera changed. Your microphone and call remain connected.');
+    } catch (cause) {
+      if (generation === mediaGenerationRef.current) setMediaMessage(`Unable to use this camera. ${cause instanceof Error ? cause.message : 'Try another camera.'}`);
+    } finally {
+      switchingCameraRef.current = false;
+      setSwitchingCamera(false);
+    }
+  }
+
+  function restorePendingCall(pending: IncomingCall & { report?: ReportForm | null }) {
+    if (!pending) return;
+    setIncomingCall(pending);
+    setActiveCallId(pending.callId);
+    setReport(pending.report || initialReport);
+    setReportStored(Boolean(pending.report));
+    setCallState('report');
+    setStatusMessage('Pending report recovered. Submit it before receiving another call.');
   }
 
   useEffect(() => {
@@ -441,6 +558,7 @@ export default function App() {
 
     let cancelled = false;
     let ws: WebSocket | null = null;
+    let signalingQueue = Promise.resolve();
 
     const verifySessionAndConnect = async () => {
       validatingTokenRef.current = token;
@@ -456,7 +574,7 @@ export default function App() {
         return;
       }
 
-      if (response.status === 401) {
+      if (response.status === 401 || response.status === 403) {
         await handleUnauthorized();
         return;
       }
@@ -472,6 +590,7 @@ export default function App() {
       }
 
       setProfile(data.interpreter);
+      if (data.pendingCall) restorePendingCall(data.pendingCall);
 
       ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
       wsRef.current = ws;
@@ -480,7 +599,16 @@ export default function App() {
       ws.onmessage = (event) => {
         const message = JSON.parse(event.data);
         switch (message.type) {
+          case 'AUTH_REVOKED':
+            clearSession('Access revoked', message.payload?.message || 'Interpreter access revoked. Contact the hotel administrator.');
+            break;
+          case 'AUTH_UNAVAILABLE':
+            clearSession('Authentication unavailable', 'The hotel authentication service is unavailable. Please sign in again later.');
+            break;
           case 'CALL_REQUEST':
+            setReport(initialReport);
+            setReportStored(false);
+            activeCallIdRef.current = message.payload.callId;
             setIncomingCall(message.payload);
             setActiveCallId(message.payload.callId);
             setCallState('incoming');
@@ -492,27 +620,52 @@ export default function App() {
             setCallState('active');
             setStatusMessage('Call accepted');
             break;
+          case 'CALL_ERROR':
+            setError('The call server could not process the request. End the call and try again.');
+            break;
           case 'CALL_ENDED':
-            setCallState('report');
-            setStatusMessage('Call ended. Report required.');
+            activeCallIdRef.current = null;
+            setCallState(message.payload?.reportRequired === false ? 'available' : 'report');
+            setStatusMessage(message.payload?.reportRequired === false ? 'Call cancelled before acceptance. Available for calls.' : 'Call ended. Report required.');
+            if (message.payload?.reportRequired === false) { setIncomingCall(null); setActiveCallId(null); }
             resetMediaSession();
             break;
           case 'WEBRTC_OFFER':
           case 'WEBRTC_ANSWER':
           case 'WEBRTC_ICE_CANDIDATE':
-            void handleSignalMessage(message);
+            signalingQueue = signalingQueue.then(() => {
+              if (!cancelled) return handleSignalMessage(message);
+            }).catch(() => {
+              if (!cancelled) setMediaMessage('Unable to process call signaling. Retry media.');
+            });
             break;
           default:
             break;
         }
       };
-      ws.onclose = () => setStatusMessage('Socket closed');
+      ws.onerror = () => setStatusMessage('Unable to connect to call server. Check the gateway URL.');
+      ws.onclose = (event) => {
+        if (!cancelled) {
+          if (event.code === 1008 || event.code === 1013) {
+            clearSession('Disconnected', event.code === 1008
+              ? 'Interpreter session expired or access revoked. Contact the hotel administrator.'
+              : 'Hotel authentication is unavailable. Please sign in again later.');
+            return;
+          }
+          activeCallIdRef.current = null;
+          resetMediaSession();
+          setStatusMessage('Socket closed. Sign in again to reconnect.');
+        }
+      };
     };
 
-    void verifySessionAndConnect();
+    void verifySessionAndConnect().catch(() => {
+      if (!cancelled) setError('Unable to reach the call server. Check the API URL and Nginx connection.');
+    });
 
     return () => {
       cancelled = true;
+      activeCallIdRef.current = null;
       if (validatingTokenRef.current === token) {
         validatingTokenRef.current = null;
       }
@@ -528,10 +681,11 @@ export default function App() {
 
   useEffect(() => {
     attachStream(remoteVideoRef.current, remoteStreamRef.current);
+    void playRemoteMedia();
   }, [callState]);
 
   const canSubmitReport = useMemo(() => {
-    if (!report.summary || !report.priority || !report.category) return false;
+    if (!report.summary.trim() || !report.priority || !report.category.trim()) return false;
     if (report.followUpRequired && !report.notes.trim()) return false;
     return true;
   }, [report]);
@@ -547,19 +701,22 @@ export default function App() {
       body: JSON.stringify({ availabilityStatus, currentCallId }),
     });
 
-    if (response.status === 401) {
+    if (response.status === 401 || response.status === 403) {
       await handleUnauthorized();
-      return;
+      return false;
     }
 
     if (!response.ok) {
-      throw new Error('Unable to update interpreter presence');
+      const data = await response.json();
+      throw new Error(data.error || 'Unable to update interpreter presence');
     }
+    return true;
   }
 
   async function handleLogin(event: FormEvent) {
     event.preventDefault();
     setError('');
+    try {
     const response = await fetch(`${API_URL}/api/interpreter/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -576,43 +733,65 @@ export default function App() {
     localStorage.setItem('interpreter_token', data.token);
     localStorage.setItem('interpreter_profile', JSON.stringify(data.interpreter));
     setCallState('idle');
+    } catch {
+      setError('Unable to reach the authentication service. Please try again later.');
+    }
   }
 
   async function handleAvailability() {
-    await updatePresence('available');
-    setCallState('available');
-    setStatusMessage('Available for calls');
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      setError('Wait for the call server connection before going available. If disconnected, sign in again.');
+      return;
+    }
+    setError('');
+    try {
+      if (!await updatePresence('available')) return;
+      setCallState('available');
+      setStatusMessage('Available for calls');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to update availability.');
+    }
   }
 
   async function handleReject() {
     wsRef.current?.send(JSON.stringify({ type: 'CALL_REJECTED', payload: { callId: activeCallId } }));
-    await updatePresence('available');
+    if (!await updatePresence('available')) return;
     resetMediaSession();
+    activeCallIdRef.current = null;
     setIncomingCall(null);
     setActiveCallId(null);
     setCallState('available');
   }
 
   async function handleAccept() {
-    if (!activeCallId) {
+    if (!activeCallId || mediaPendingRef.current) {
+      return;
+    }
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      setError('The call server is disconnected. Sign in again before accepting a call.');
       return;
     }
     setError('');
+    activeCallIdRef.current = activeCallId;
     wsRef.current?.send(JSON.stringify({ type: 'CALL_ACCEPTED', payload: { callId: activeCallId } }));
-    await updatePresence('busy', activeCallId);
-    await prepareLocalMedia(activeCallId);
     setCallState('active');
+    await prepareLocalMedia(activeCallId);
   }
 
   function handleEndCall() {
     wsRef.current?.send(JSON.stringify({ type: 'CALL_ENDED', payload: { callId: activeCallId, reason: 'completed' } }));
     resetMediaSession();
+    activeCallIdRef.current = null;
     setCallState('report');
   }
 
   async function handleSubmitReport(event: FormEvent) {
     event.preventDefault();
-    if (!token || !activeCallId || !canSubmitReport) return;
+    if (!token || !activeCallId || !canSubmitReport || submittingReportRef.current) return;
+    submittingReportRef.current = true;
+    setSubmittingReport(true);
+    setError('');
+    try {
 
     const response = await fetch(`${API_URL}/api/calls/${activeCallId}/report`, {
       method: 'POST',
@@ -623,24 +802,37 @@ export default function App() {
       body: JSON.stringify(report),
     });
 
-    if (response.status === 401) {
+    if (response.status === 401 || response.status === 403) {
       await handleUnauthorized();
       return;
     }
 
     const data = await response.json();
     if (!response.ok) {
-      setError(data.error || 'Unable to submit report');
+      if (data.reportId) {
+        setReportStored(true);
+        if (data.report) setReport(data.report);
+      }
+      setError(data.reportId
+        ? 'Report saved in the call server, but the hotel has not confirmed receipt. Retry delivery; the saved report will not be duplicated.'
+        : data.error || 'Unable to submit report');
       return;
     }
 
-    await updatePresence('available');
+    if (data.pendingCall) { restorePendingCall(data.pendingCall); return; }
     setIncomingCall(null);
     setActiveCallId(null);
     setReport(initialReport);
+    setReportStored(false);
     resetMediaSession();
     setCallState('available');
     setStatusMessage('Report submitted to ASL-Web');
+    } catch {
+      setError('Delivery could not be confirmed. Retry this report; the server reuses its saved copy if it already exists.');
+    } finally {
+      submittingReportRef.current = false;
+      setSubmittingReport(false);
+    }
   }
 
   function handleLogout() {
@@ -650,6 +842,7 @@ export default function App() {
   function toggleTrack(kind: 'audio' | 'video') {
     const stream = localStreamRef.current;
     if (!stream) {
+      if (activeCallIdRef.current) void prepareLocalMedia(activeCallIdRef.current);
       return;
     }
 
@@ -823,7 +1016,8 @@ export default function App() {
                   {isCameraEnabled ? <VideoIcon className="icon-sm" /> : <CameraOffIcon className="icon-sm" />}
                   {isCameraEnabled ? 'Stop camera' : 'Start camera'}
                 </button>
-                <button type="button" onClick={() => activeCallId && prepareLocalMedia(activeCallId)} className="ghost-button">
+                <CameraOptions selected={cameraId} busy={switchingCamera || mediaState === 'preparing'} onSelect={selectCamera} />
+                <button type="button" disabled={mediaState === 'preparing'} onClick={() => activeCallId && prepareLocalMedia(activeCallId)} className="ghost-button">
                   <WifiIcon className="icon-sm" />
                   Retry media
                 </button>
@@ -858,7 +1052,7 @@ export default function App() {
                     <h3>Local preview</h3>
                   </div>
                   <span className={clsx('info-badge', isCameraEnabled ? 'tone-green' : 'tone-amber')}>
-                    {isCameraEnabled ? 'Camera live' : 'Camera paused'}
+                    {!localStreamRef.current ? 'Camera offline' : isCameraEnabled ? 'Camera live' : 'Camera paused'}
                   </span>
                 </div>
                 <div className="video-frame">
@@ -883,7 +1077,8 @@ export default function App() {
                   </span>
                 </div>
                 <div className="video-frame">
-                  <video ref={remoteVideoRef} className="video-surface" autoPlay playsInline />
+                  <video ref={remoteVideoRef} className="video-surface" autoPlay playsInline controls
+                    onLoadedMetadata={() => void playRemoteMedia()} onPlaying={() => setRemotePlaybackBlocked(false)} />
                   {mediaState !== 'connected' && (
                     <div className="video-placeholder">
                       <WifiIcon className="icon-md" />
@@ -891,6 +1086,10 @@ export default function App() {
                     </div>
                   )}
                 </div>
+                {remotePlaybackBlocked && <div role="status">
+                  <p>Your browser paused guest audio/video. Enable playback to hear the guest.</p>
+                  <button type="button" className="ghost-button" onClick={() => void playRemoteMedia()}>Enable guest audio</button>
+                </div>}
               </article>
             </div>
           </StatePanel>
@@ -915,11 +1114,14 @@ export default function App() {
               </div>
             </div>
 
-            <form onSubmit={handleSubmitReport} className="form-grid">
+            {reportStored && <p role="status">A saved report is pending hotel confirmation. Retry to send the same report.</p>}
+            <form onSubmit={handleSubmitReport}>
+              <fieldset className="form-grid report-fields" disabled={submittingReport || reportStored}>
               <label className="field field-wide">
                 <span>Summary</span>
                 <textarea
                   value={report.summary}
+                  maxLength={4000}
                   onChange={(e) => setReport((current) => ({ ...current, summary: e.target.value }))}
                   placeholder="Summary of the interpretation session"
                   rows={4}
@@ -943,6 +1145,7 @@ export default function App() {
                 <span>Category</span>
                 <input
                   value={report.category}
+                  maxLength={120}
                   onChange={(e) => setReport((current) => ({ ...current, category: e.target.value }))}
                   placeholder="Medical, concierge, room issue..."
                 />
@@ -961,15 +1164,17 @@ export default function App() {
                 <span>Notes for hotel follow-up</span>
                 <textarea
                   value={report.notes}
+                  maxLength={8000}
                   onChange={(e) => setReport((current) => ({ ...current, notes: e.target.value }))}
                   placeholder="Operational notes, pending actions, or guest context"
                   rows={5}
                 />
               </label>
 
-              <button disabled={!canSubmitReport} type="submit" className="primary-button">
+              </fieldset>
+              <button disabled={!canSubmitReport || submittingReport} type="submit" className="primary-button">
                 <CheckCircleIcon className="icon-sm" />
-                Submit report
+                {submittingReport ? 'Sending to hotel...' : reportStored ? 'Retry delivery to hotel' : 'Submit report'}
               </button>
             </form>
 
