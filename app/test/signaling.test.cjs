@@ -56,17 +56,18 @@ function harness(session = {}) {
   const storage = new Map([['interpreter_token', token], ['interpreter_profile', JSON.stringify(profile)]]);
   const localStream = new Stream();
   localStream.addTrack({ id: 'camera', kind: 'video', enabled: true, stop: () => stopped++ });
-  const imports = { react, './CameraOptions': { default: 'CameraOptions' }, './camera': {}, 'react/jsx-runtime': {
+  const imports = { react, '../assets/Logo/Hotel logo.png': { default: 'hotel-logo.png' }, './CallHistory': { default: 'CallHistory' }, './CameraOptions': { default: 'CameraOptions' }, './camera': {}, 'react/jsx-runtime': {
     jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }),
   } };
   const source = fs.readFileSync(path.join(__dirname, '../src/App.tsx'), 'utf8').replaceAll('import.meta.env', '({})');
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
-  new Function('module', 'exports', 'require', 'localStorage', 'navigator', 'window', 'fetch', 'WebSocket', 'RTCPeerConnection', 'MediaStream', code)(
+  new Function('module', 'exports', 'require', 'localStorage', 'navigator', 'window', 'fetch', 'WebSocket', 'RTCPeerConnection', 'MediaStream', 'document', code)(
     module, module.exports, name => imports[name],
     { getItem: key => storage.get(key) || null, removeItem: key => storage.delete(key) },
     { mediaDevices: { getUserMedia: () => { captures++; return capture; } } }, { isSecureContext: true },
     async () => ({ ok: true, json: async () => ({ interpreter: profile, ...session }) }), Socket, Peer, Stream,
+    { querySelector: () => null, createElement: () => ({}), head: { appendChild() {} } },
   );
   function render() {
     index = 0;

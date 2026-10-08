@@ -7,6 +7,7 @@ import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { CallSession, InterpreterPresence, InterpreterReport } from './models/index.js';
 import { createInterpreterAuth, createLoginLimiter } from './interpreterAuth.js';
+import { createInterpreterHistoryRouter } from './interpreterHistory.js';
 
 config();
 
@@ -20,6 +21,9 @@ const CALL_INTERNAL_TOKEN = process.env.CALL_INTERNAL_TOKEN || '';
 const REPORT_FORWARD_TIMEOUT_MS = Number(process.env.REPORT_FORWARD_TIMEOUT_MS || 8000);
 const interpreterAuth = createInterpreterAuth({ hotelUrl: ASL_WEB_API_URL, internalToken: CALL_INTERNAL_TOKEN, secret: INTERPRETER_JWT_SECRET });
 const DEFAULT_ALLOWED_ORIGINS = [
+  'http://tauri.localhost',
+  'https://tauri.localhost',
+  'tauri://localhost',
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:8080',
@@ -310,6 +314,10 @@ async function pendingReportFor(interpreterId) {
   return { callId: session.callId, roomNumber: session.roomNumber, guestName: session.guestName, report };
 }
 
+app.use('/api/interpreter', createInterpreterHistoryRouter({
+  verifyInterpreter: verifyInterpreterHttp, CallSession, InterpreterReport,
+}));
+
 app.get('/api/interpreter/session', verifyInterpreterHttp, async (req, res) => {
   try {
     const pendingCall = await pendingReportFor(req.user.userId);
@@ -526,6 +534,7 @@ wss.on('connection', (socket) => {
               roomNumber: currentMeta.roomNumber,
               guestName: currentMeta.guestName,
               status: available ? 'ringing' : 'unavailable',
+              assignedInterpreterId: available?.presence.interpreterId ?? null,
               endedAt: available ? null : now,
               endReason: available ? null : 'no_interpreter_available',
               answeredAt: null,

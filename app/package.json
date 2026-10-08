@@ -5,6 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build --bundles nsis",
+    "desktop:icons": "tauri icon \"assets/Logo/Hotel logo.png\"",
+    "desktop:frontend": "tsc -b && vite build --mode desktop",
     "build": "tsc -b && vite build",
     "test": "node --test test/*.test.cjs",
     "preview": "vite preview"
@@ -14,6 +19,7 @@
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.4",
