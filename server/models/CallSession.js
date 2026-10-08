@@ -7,6 +7,7 @@ const callSessionSchema = new mongoose.Schema(
     roomNumber: { type: String, required: true, index: true },
     guestName: { type: String, required: true },
     interpreterId: { type: String, default: null, index: true },
+    assignedInterpreterId: { type: String, default: null, index: true },
     interpreterName: { type: String, default: null },
     status: {
       type: String,
@@ -29,5 +30,7 @@ const callSessionSchema = new mongoose.Schema(
   { timestamps: true, versionKey: false }
 );
 
+callSessionSchema.index({ interpreterId: 1, requestedAt: -1, _id: -1 });
+callSessionSchema.index({ assignedInterpreterId: 1, requestedAt: -1, _id: -1 });
 const CallSession = mongoose.model('CallSession', callSessionSchema);
 export { CallSession };

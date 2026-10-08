@@ -1,5 +1,6 @@
 import { FormEvent, ReactNode, SVGProps, useEffect, useMemo, useRef, useState } from 'react';
 import CameraOptions from './CameraOptions';
+import CallHistory from './CallHistory';
 import { replaceCamera } from './camera';
 import hotelLogoUrl from '../assets/Logo/Hotel logo.png';
 
@@ -208,6 +209,7 @@ function getStoredInterpreterToken() {
 }
 
 export default function App() {
+  const [showHistory, setShowHistory] = useState(false);
   const [token, setToken] = useState<string | null>(() => getStoredInterpreterToken());
   const [profile, setProfile] = useState<{ userId: string; fullName: string; username: string } | null>(() => {
     const raw = localStorage.getItem('interpreter_profile');
@@ -254,6 +256,7 @@ export default function App() {
   }, []);
 
   function clearSession(nextMessage = 'Disconnected', nextError = '') {
+    setShowHistory(false);
     activeCallIdRef.current = null;
     wsRef.current?.close();
     wsRef.current = null;
@@ -892,6 +895,10 @@ export default function App() {
                 </div>
                 <strong>{profile.fullName}</strong>
                 <span>@{profile.username}</span>
+                <button className="ghost-button" aria-expanded={showHistory} aria-controls="call-history" onClick={() => setShowHistory(value => !value)}>
+                  <ClipboardIcon className="icon-sm" />
+                  {showHistory ? 'Hide history' : 'Call history'}
+                </button>
                 <button onClick={handleLogout} className="ghost-button">
                   <LogoutIcon className="icon-sm" />
                   Logout
@@ -924,6 +931,9 @@ export default function App() {
             />
           </div>
         </section>
+
+        {token && showHistory && <CallHistory key={token} apiUrl={API_URL} token={token}
+          revision={`${callState}:${reportStored}`} onUnauthorized={handleUnauthorized} />}
 
         {!token && (
           <section className="panel-card">

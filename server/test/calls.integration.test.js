@@ -110,6 +110,7 @@ test('isolated call server: request, ring, accept, signaling, end and persistenc
       await mobile.wait('CALL_PENDING', callId);
       await interpreter.wait('CALL_REQUEST', callId);
       assert.equal((await connection.collection('callsessions').findOne({ callId })).status, 'ringing');
+      assert.equal((await connection.collection('callsessions').findOne({ callId })).assignedInterpreterId, identity.userId);
       interpreter.send('CALL_ACCEPTED', { callId });
       await mobile.wait('CALL_ACCEPTED', callId);
       interpreter.send('WEBRTC_OFFER', { callId, sdp: { type: 'offer', sdp: 'qa-offer' } });
@@ -135,5 +136,56 @@ test('isolated call server: request, ring, accept, signaling, end and persistenc
       assert.equal(presence.currentCallId, null);
       assert.ok(!interpreter.messages.some(m => m.type === 'CALL_REQUEST' && m.payload.callId === callId));
       assert.match(errors, /CALL_MESSAGE_FAILED/);
+    });
+
+    await t.test('history isolates ownership, reports and pagination through authenticated HTTP', async () => {
+      const foreignId = '222222222222222222222222';
+      const sessions = Array.from({ length: 22 }, (_, index) => ({
+        callId: `qa-history-${index}`, roomNumber: 'QA', guestName: 'History Guest',
+        interpreterId: index === 21 ? null : identity.userId,
+        assignedInterpreterId: identity.userId,
+        status: 'completed', requestedAt: new Date(Date.UTC(2030, 0, 1, 0, index)),
+        answeredAt: index === 21 ? null : new Date(Date.UTC(2030, 0, 1, 0, index)),
+        endedAt: new Date(Date.UTC(2030, 0, 1, 0, index, 30)),
+      }));
+      await connection.collection('callsessions').insertMany([
+        ...sessions,
+        { callId: 'qa-foreign', interpreterId: foreignId, roomNumber: 'Private', guestName: 'Private Guest', requestedAt: new Date('2031-01-01') },
+      ]);
+      await connection.collection('interpreterreports').insertMany([
+        { callId: 'qa-history-20', interpreterId: identity.userId, reportId: 'qa-own-report',
+          summary: 'Own summary', notes: 'Own notes', priority: 'high', category: 'services', followUpRequired: true,
+          forwardedToAslWeb: true, submittedAt: new Date(), forwardError: 'internal-only' },
+        { callId: 'qa-history-21', interpreterId: foreignId, reportId: 'qa-foreign-report', summary: 'PRIVATE' },
+      ]);
+      async function history(query = '', token = login.token) {
+        const response = await fetch(`${base}/api/interpreter/history${query}`, {
+          headers: token ? { Authorization: `Bearer ${token}`, Origin: 'http://tauri.localhost' } : {},
+        });
+        return { response, data: await response.json() };
+      }
+      const { response, data } = await history(`?page=1&pageSize=20&interpreterId=${foreignId}`);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.equal(response.headers.get('access-control-allow-origin'), 'http://tauri.localhost');
+      assert.equal(data.total, 23); // 22 fixtures plus the completed real call above.
+      assert.equal(data.totalPages, 2);
+      assert.equal(data.calls.length, 20);
+      assert.equal(data.calls[0].callId, 'qa-history-21');
+      assert.equal(data.calls[0].report, null);
+      assert.equal(data.calls[1].report.summary, 'Own summary');
+      assert.equal(data.calls[1].report.notes, 'Own notes');
+      assert.equal(data.calls[1].report.forwardedToAslWeb, true);
+      assert.equal(data.calls[1].report.forwardError, undefined);
+      assert.equal(data.calls[1].interpreterId, undefined);
+      assert.ok(!JSON.stringify(data).includes('PRIVATE'));
+      const next = await history('?page=2&pageSize=20');
+      assert.equal(next.data.calls.length, 3);
+      assert.ok(!next.data.calls.some(call => data.calls.some(first => first.callId === call.callId)));
+      for (const query of ['?page=0', '?pageSize=51', '?page=1.5', '?page[$ne]=1']) {
+        assert.equal((await history(query)).response.status, 400);
+      }
+      assert.equal((await history('', null)).response.status, 401);
+      assert.equal((await history('', 'invalid-token')).response.status, 401);
     });
   });
