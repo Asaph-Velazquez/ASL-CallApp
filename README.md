@@ -108,7 +108,38 @@ La consola conserva el login `/api/interpreter/login`. El backend consulta `/api
 
 Las sesiones se revisan cada 20 segundos y las consultas al hotel caducan a los cinco segundos. Quitar el rol o eliminar al usuario cierra sesiones y llamadas en menos de 30 segundos; se libera la captura multimedia. Si el hotel no esta disponible, tampoco se permiten accesos locales alternativos: se informa del fallo temporal y se cierran las sesiones que no puedan revalidarse. Los intentos de login fallidos se limitan a cinco por IP cada 15 minutos.
 
-### Reportes y opciones de camara
+### Historial personal de llamadas
+
+En el panel de identidad, **Call history** abre las llamadas del intérprete
+autenticado, desde la más reciente, con 20 registros por página. Muestra huésped,
+habitación, fecha de solicitud, aceptación y fin, duración y motivo de cierre.
+**View report** despliega resumen, prioridad, categoría, seguimiento, notas y
+estado de entrega al hotel. Las llamadas sin reporte indican si aún falta
+enviarlo o si no fueron aceptadas. **Refresh history** vuelve a consultar los datos;
+el historial también se actualiza cuando cambia el estado de la llamada o del reporte.
+La consola mantiene su conexión y sus controles de llamada mientras se consulta.
+
+La API `GET /api/interpreter/history?page=1&pageSize=20` revalida la identidad
+central y filtra exclusivamente por ella. Acepta hasta 50 registros por página,
+devuelve `calls`, `page`, `pageSize`, `total` y `totalPages`, y evita caché de datos
+personales. El gateway ya enruta `/api/interpreter/*` al servidor de llamadas.
+Los reportes se consultan en modo lectura; la captura y los reintentos de entrega
+continúan en el flujo obligatorio al finalizar la llamada.
+
+Las llamadas antiguas aceptadas o rechazadas conservan su asociación existente.
+Desde esta actualización también se guarda `assignedInterpreterId` cuando se
+ofrece una llamada, para incluir cancelaciones previas a la aceptación sin exigir
+reporte. No se reconstruyen asociaciones que nunca se guardaron ni se vinculan
+cuentas antiguas por nombre de usuario. Las cuentas recreadas tienen otra identidad.
+
+Verificación del historial (2026-10-08): 17 pruebas de consola aprobadas; build
+web y Tauri/NSIS x64 aprobados. La integración con MongoDB aislado comprueba
+aislamiento entre intérpretes, reportes, paginación, CORS de Tauri y autenticación.
+Las integraciones de identidad y entrega al hotel pasan en ejecución secuencial;
+su primera ejecución paralela agotó el tiempo de arranque durante el build nativo.
+La vista en la aplicación instalada y una llamada física no se verificaron aquí.
+
+### Envío de reportes y dispositivos
 
 - Al terminar una llamada aceptada, el interprete completa el reporte obligatorio. El hotel lo recibe en **Interpreter Reports**, con actualizacion en vivo y el estado actual del seguimiento.
 - Si se requiere seguimiento, tambien aparece una solicitud **interpreter-follow-up** en el dashboard. Si no se requiere, solo se registra el reporte.
@@ -117,6 +148,58 @@ Las sesiones se revisan cada 20 segundos y las consultas al hotel caducan a los 
 - El navegador requiere HTTPS o localhost para detectar y usar dispositivos. Un dispositivo detectado puede estar ocupado por otra aplicacion; en ese caso se muestra el error al seleccionarlo.
 
 ## ▶️ Ejecutar el Proyecto
+
+### Aplicación de escritorio Windows (Tauri 2)
+
+La consola también se distribuye como **ASL Interpreter**, con el logo de
+`app/assets/Logo/Hotel logo.png`. El instalador incluye la interfaz React;
+ASL-Web, el servidor de llamadas, MongoDB y Nginx se ejecutan por separado.
+
+Para compilar necesitas Rust con el toolchain MSVC, Visual Studio Build Tools
+con C++ para escritorio y Windows SDK, Node.js y WebView2. Requisitos oficiales:
+https://v2.tauri.app/start/prerequisites/
+
+Desde `ASL-CallAPP/app`:
+
+```powershell
+npm ci
+Copy-Item .env.desktop.example .env.desktop.local
+# Edita .env.desktop.local con las URLs HTTPS/WSS del gateway del hotel.
+npm run desktop:dev
+npm run desktop:build
+```
+
+El modo `desktop` lee `.env` y después `.env.desktop.local`; las variables del
+proceso tienen prioridad. Para pruebas en la misma computadora puedes configurar
+`http://localhost:3101` y `ws://localhost:3101/calls`. En otra computadora,
+localhost apunta a esa computadora, no al servidor del hotel. Las URLs se integran
+al compilar: si cambia el dominio, hay que reconstruir el instalador. No incluyas
+contraseñas ni `CALL_INTERNAL_TOKEN` en variables `VITE_*`.
+
+El instalador queda en `app/src-tauri/target/release/bundle/nsis/` y el ejecutable
+en `app/src-tauri/target/release/asl-callapp.exe`. La instalación es por usuario;
+si falta WebView2, descarga su instalador oficial y necesita Internet. El paquete
+no está firmado digitalmente. `npm run desktop:icons` regenera los iconos a partir
+del logo. Conserva `Cargo.lock` y `app/package-lock.json` para reproducir el build.
+
+Reinicia el backend de llamadas actualizado: su lista CORS admite los origins
+locales de Tauri. La autenticación sigue exigiendo una cuenta **Interpreter** de
+Staff Management. No se añaden comandos nativos ni permisos de archivos al frontend.
+
+Cámara, micrófono y WebRTC usan WebView2. En Windows habilita el acceso de
+aplicaciones de escritorio a cámara y micrófono en Configuración > Privacidad.
+Antes de distribuir, verifica login, Go available, recepción y aceptación desde
+el móvil, audio/video en ambas direcciones, cambio de cámara, envío del reporte,
+revocación de sesión y cierre de ventana con liberación de dispositivos. Compilar
+no sustituye esa prueba física; STUN sin TURN conserva sus limitaciones entre redes.
+
+Verificación del empaquetado (2026-10-08): compilación release y NSIS x64
+correctas; el ejecutable inicia y responde con título **ASL Interpreter Console**.
+Las 12 pruebas de la consola pasan. La suite del servidor pasa una prueba y omite
+las tres integraciones que requieren MongoDB de prueba. `cargo fmt --check` y
+`node --check server/index.js` pasan. El instalador generado en esta verificación
+usa `localhost:3101`; quedan pendientes la instalación en otra computadora y
+la llamada física completa. El arranque del proceso no verifica visualmente la UI.
 
 Asegurate de que MongoDB este disponible antes de iniciar el servidor.
 
