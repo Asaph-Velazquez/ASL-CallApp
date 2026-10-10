@@ -15,6 +15,7 @@ Dominio de llamadas del sistema ASL para conectar huespedes con interpretes en t
 - Cambio de disponibilidad para recibir llamadas
 - Recepcion y aceptacion/rechazo de llamadas entrantes
 - Captura de reporte obligatorio al finalizar una llamada
+- Ante perdida de WebSocket, reconexion automatica cada 10 segundos con validacion de sesion y recuperacion del reporte pendiente. Las sesiones vencidas o revocadas requieren iniciar sesion nuevamente. Una llamada que el servidor ya finalizo por error de red conserva su requisito de reporte.
 
 ### Integracion con ASL-Web
 - Reenvio de reportes de interpretacion al panel web

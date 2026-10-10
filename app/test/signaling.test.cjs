@@ -6,7 +6,9 @@ const ts = require('typescript');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
 function harness(session = {}) {
-  const slots = [], effects = [], sockets = [], peers = [];
+  const slots = [], effects = [], sockets = [], peers = [], cleanups = [];
+  const timers = new Map();
+  let timerId = 0;
   let index = 0, resolveCapture, captures = 0, stopped = 0;
   const capture = new Promise(resolve => { resolveCapture = resolve; });
   const react = {
@@ -62,17 +64,19 @@ function harness(session = {}) {
   const source = fs.readFileSync(path.join(__dirname, '../src/App.tsx'), 'utf8').replaceAll('import.meta.env', '({})');
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
-  new Function('module', 'exports', 'require', 'localStorage', 'navigator', 'window', 'fetch', 'WebSocket', 'RTCPeerConnection', 'MediaStream', 'document', code)(
+  new Function('module', 'exports', 'require', 'localStorage', 'navigator', 'window', 'fetch', 'WebSocket', 'RTCPeerConnection', 'MediaStream', 'document', 'setTimeout', 'clearTimeout', code)(
     module, module.exports, name => imports[name],
     { getItem: key => storage.get(key) || null, removeItem: key => storage.delete(key) },
     { mediaDevices: { getUserMedia: () => { captures++; return capture; } } }, { isSecureContext: true },
     async () => ({ ok: true, json: async () => ({ interpreter: profile, ...session }) }), Socket, Peer, Stream,
     { querySelector: () => null, createElement: () => ({}), head: { appendChild() {} } },
+    (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
+    id => timers.delete(id),
   );
   function render() {
     index = 0;
     const tree = module.exports.default();
-    effects.splice(0).forEach(fn => fn());
+    effects.splice(0).forEach(fn => cleanups.push(fn()));
     return tree;
   }
   function accept(node = render()) {
@@ -85,10 +89,48 @@ function harness(session = {}) {
   }
   render();
   return { sockets, peers, render, accept, localStream, storage,
+    timers,
+    runTimer(delay) {
+      const [id, timer] = [...timers].find(([, timer]) => timer.delay === delay) || [];
+      assert.ok(timer, `expected timer at ${delay}ms`);
+      timers.delete(id);
+      timer.callback();
+    },
+    cleanup: () => cleanups.forEach(fn => fn?.()),
     resolveCapture: () => resolveCapture(localStream),
     counts: () => ({ captures, stopped }),
-  };
+};
 }
+
+test('interpreter sockets reconnect in ten seconds without clearing credentials', async () => {
+  const h = harness();
+  await flush();
+  const socket = h.sockets[0];
+  socket.onopen();
+  socket.readyState = 3;
+  socket.onclose({ code: 1006 });
+  assert.equal(h.storage.has('interpreter_token'), true);
+  h.runTimer(10000);
+  await flush();
+  assert.equal(h.sockets.length, 2);
+  h.sockets[1].onopen();
+  assert.equal(h.timers.size, 0);
+  h.cleanup();
+});
+
+test('revoked interpreter sessions and screen cleanup cancel reconnection', async () => {
+  for (const revoked of [false, true]) {
+    const h = harness();
+    await flush();
+    const socket = h.sockets[0];
+    socket.onopen();
+    if (revoked) socket.receive('AUTH_REVOKED');
+    else { socket.readyState = 3; socket.onclose({ code: 1006 }); }
+    h.cleanup();
+    assert.equal(h.timers.size, 0);
+    assert.equal(h.storage.has('interpreter_token'), !revoked);
+  }
+});
 
 test('socket handlers use the new call ID after a rerender and queue early ICE', async () => {
   const h = harness();

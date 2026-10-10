@@ -570,28 +570,51 @@ export default function App() {
     let cancelled = false;
     let ws: WebSocket | null = null;
     let signalingQueue = Promise.resolve();
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let connectionTimer: ReturnType<typeof setTimeout> | undefined;
+    let connecting = false;
+    let revoked = false;
+    let displayedCallId: string | null = null;
+    let sessionController: AbortController | null = null;
+    const clearConnectionTimer = () => {
+      if (connectionTimer) clearTimeout(connectionTimer);
+      connectionTimer = undefined;
+    };
+    const scheduleReconnect = () => {
+      if (cancelled || revoked || retryTimer) return;
+      setStatusMessage('Connection lost. Reconnecting in 10 seconds...');
+      retryTimer = setTimeout(() => {
+        retryTimer = undefined;
+        void connect();
+      }, 10000);
+    };
 
     const verifySessionAndConnect = async () => {
       validatingTokenRef.current = token;
       setStatusMessage('Validating interpreter session...');
 
-      const response = await fetch(`${API_URL}/api/interpreter/session`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      sessionController = new AbortController();
+      const timeout = setTimeout(() => sessionController?.abort(), 15000);
+      let response: Response;
+      try {
+        response = await fetch(`${API_URL}/api/interpreter/session`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: sessionController.signal,
+        });
+      } finally { clearTimeout(timeout); }
 
       if (cancelled) {
         return;
       }
 
       if (response.status === 401 || response.status === 403) {
+        revoked = true;
         await handleUnauthorized();
         return;
       }
 
       if (!response.ok) {
-        setStatusMessage('Unable to validate interpreter session');
+        scheduleReconnect();
         return;
       }
 
@@ -601,22 +624,45 @@ export default function App() {
       }
 
       setProfile(data.interpreter);
-      if (data.pendingCall) restorePendingCall(data.pendingCall);
+      if (data.pendingCall) {
+        if (displayedCallId !== data.pendingCall.callId) restorePendingCall(data.pendingCall);
+        else setCallState('report');
+        displayedCallId = data.pendingCall.callId;
+      } else {
+        displayedCallId = null;
+        setActiveCallId(null);
+        setIncomingCall(null);
+        setCallState('available');
+      }
 
       ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
-      wsRef.current = ws;
+      const socket = ws;
+      wsRef.current = socket;
+      const isCurrent = () => !cancelled && !revoked && wsRef.current === socket;
+      connectionTimer = setTimeout(() => {
+        if (isCurrent()) { socket.close(); scheduleReconnect(); }
+      }, 15000);
 
-      ws.onopen = () => setStatusMessage('Connected to call server');
+      ws.onopen = () => {
+        if (!isCurrent()) return;
+        clearConnectionTimer();
+        setError('');
+        setStatusMessage('Connected to call server');
+      };
       ws.onmessage = (event) => {
+        if (!isCurrent()) return;
         const message = JSON.parse(event.data);
         switch (message.type) {
           case 'AUTH_REVOKED':
+            revoked = true;
             clearSession('Access revoked', message.payload?.message || 'Interpreter access revoked. Contact the hotel administrator.');
             break;
           case 'AUTH_UNAVAILABLE':
+            revoked = true;
             clearSession('Authentication unavailable', 'The hotel authentication service is unavailable. Please sign in again later.');
             break;
           case 'CALL_REQUEST':
+            displayedCallId = message.payload.callId;
             setReport(initialReport);
             setReportStored(false);
             activeCallIdRef.current = message.payload.callId;
@@ -645,19 +691,23 @@ export default function App() {
           case 'WEBRTC_ANSWER':
           case 'WEBRTC_ICE_CANDIDATE':
             signalingQueue = signalingQueue.then(() => {
-              if (!cancelled) return handleSignalMessage(message);
+              if (isCurrent()) return handleSignalMessage(message);
             }).catch(() => {
-              if (!cancelled) setMediaMessage('Unable to process call signaling. Retry media.');
+              if (isCurrent()) setMediaMessage('Unable to process call signaling. Retry media.');
             });
             break;
           default:
             break;
         }
       };
-      ws.onerror = () => setStatusMessage('Unable to connect to call server. Check the gateway URL.');
+      ws.onerror = () => {
+        if (isCurrent()) { socket.close(); scheduleReconnect(); }
+      };
       ws.onclose = (event) => {
-        if (!cancelled) {
+        if (isCurrent()) {
+          clearConnectionTimer();
           if (event.code === 1008 || event.code === 1013) {
+            revoked = true;
             clearSession('Disconnected', event.code === 1008
               ? 'Interpreter session expired or access revoked. Contact the hotel administrator.'
               : 'Hotel authentication is unavailable. Please sign in again later.');
@@ -665,17 +715,40 @@ export default function App() {
           }
           activeCallIdRef.current = null;
           resetMediaSession();
-          setStatusMessage('Socket closed. Sign in again to reconnect.');
+          scheduleReconnect();
         }
       };
     };
 
-    void verifySessionAndConnect().catch(() => {
-      if (!cancelled) setError('Unable to reach the call server. Check the API URL and Nginx connection.');
-    });
+    const connect = async () => {
+      if (cancelled || revoked || connecting) return;
+      connecting = true;
+      clearConnectionTimer();
+      const previousSocket = ws;
+      wsRef.current = null;
+      ws = null;
+      if (previousSocket) {
+        previousSocket.onopen = null;
+        previousSocket.onmessage = null;
+        previousSocket.onerror = null;
+        previousSocket.onclose = null;
+        previousSocket.close();
+      }
+      signalingQueue = Promise.resolve();
+      try {
+        await verifySessionAndConnect();
+      } catch {
+        if (!cancelled && !revoked) scheduleReconnect();
+      } finally { connecting = false; }
+    };
+
+    void connect();
 
     return () => {
       cancelled = true;
+      sessionController?.abort();
+      if (retryTimer) clearTimeout(retryTimer);
+      clearConnectionTimer();
       activeCallIdRef.current = null;
       if (validatingTokenRef.current === token) {
         validatingTokenRef.current = null;
