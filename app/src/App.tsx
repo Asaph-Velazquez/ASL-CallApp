@@ -1016,14 +1016,14 @@ export default function App() {
               <p>Use the same visual rhythm as the web control panel, with a compact operational login card.</p>
             </div>
 
-            <form onSubmit={handleLogin} className="form-grid">
+            <form onSubmit={handleLogin} className="form-grid" autoComplete="off">
               <label className="field">
                 <span>Username</span>
-                <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Username" />
+                <input autoComplete="off" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Username" />
               </label>
               <label className="field">
                 <span>Password</span>
-                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" />
+                <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" />
               </label>
               <button type="submit" className="primary-button">
                 <CheckCircleIcon className="icon-sm" />
