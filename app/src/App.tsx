@@ -215,8 +215,8 @@ export default function App() {
     const raw = localStorage.getItem('interpreter_profile');
     return raw ? JSON.parse(raw) : null;
   });
-  const [username, setUsername] = useState('interpreter');
-  const [password, setPassword] = useState('hotel2026');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [callState, setCallState] = useState<CallState>('idle');
   const [incomingCall, setIncomingCall] = useState<IncomingCall>(null);
   const [activeCallId, setActiveCallId] = useState<string | null>(null);
@@ -1013,7 +1013,6 @@ export default function App() {
             <div className="section-heading">
               <span className="section-kicker">Access</span>
               <h2>Interpreter sign in</h2>
-              <p>Use the same visual rhythm as the web control panel, with a compact operational login card.</p>
             </div>
 
             <form onSubmit={handleLogin} className="form-grid" autoComplete="off">
