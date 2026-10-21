@@ -5,8 +5,9 @@ const path = require('node:path');
 const ts = require('typescript');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function harness(session = {}) {
+function harness(session = {}, presenceStatus = 200) {
   const slots = [], effects = [], sockets = [], peers = [], cleanups = [];
+  const requests = [];
   const timers = new Map();
   let timerId = 0;
   let index = 0, resolveCapture, captures = 0, stopped = 0;
@@ -68,7 +69,14 @@ function harness(session = {}) {
     module, module.exports, name => imports[name],
     { getItem: key => storage.get(key) || null, removeItem: key => storage.delete(key) },
     { mediaDevices: { getUserMedia: () => { captures++; return capture; } } }, { isSecureContext: true },
-    async () => ({ ok: true, json: async () => ({ interpreter: profile, ...session }) }), Socket, Peer, Stream,
+    async (url, options) => {
+      requests.push({ url, options });
+      if (url.endsWith('/presence')) {
+        return { ok: presenceStatus === 200, status: presenceStatus,
+          json: async () => ({ error: 'Unable to update presence' }) };
+      }
+      return { ok: true, json: async () => ({ interpreter: profile, ...session }) };
+    }, Socket, Peer, Stream,
     { querySelector: () => null, createElement: () => ({}), head: { appendChild() {} } },
     (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     id => timers.delete(id),
@@ -79,16 +87,16 @@ function harness(session = {}) {
     effects.splice(0).forEach(fn => cleanups.push(fn()));
     return tree;
   }
-  function accept(node = render()) {
+  function button(label, node = render()) {
     if (!node || typeof node !== 'object') return;
-    if (node.type === 'button' && JSON.stringify(node.props.children).includes('Accept')) return node.props.onClick;
+    if (node.type === 'button' && JSON.stringify(node.props.children).includes(label)) return node.props.onClick;
     for (const value of Object.values(node)) {
-      const found = accept(value);
+      const found = button(label, value);
       if (found) return found;
     }
   }
   render();
-  return { sockets, peers, render, accept, localStream, storage,
+  return { sockets, peers, render, accept: () => button('Accept'), button, requests, localStream, storage,
     timers,
     runTimer(delay) {
       const [id, timer] = [...timers].find(([, timer]) => timer.delay === delay) || [];
@@ -101,6 +109,61 @@ function harness(session = {}) {
     counts: () => ({ captures, stopped }),
 };
 }
+
+test('connected interpreter must confirm availability before waiting and receiving calls', async () => {
+  const h = harness();
+  try {
+    await flush();
+    h.sockets[0].onopen();
+    assert.match(JSON.stringify(h.render()), /Connected to call server/);
+    assert.doesNotMatch(JSON.stringify(h.render()), /Waiting for guest call/);
+    assert.equal(h.requests.filter(r => r.url.endsWith('/presence')).length, 0);
+    const available = h.button('Go available');
+    assert.equal(typeof available, 'function');
+    await available();
+    const request = h.requests.find(r => r.url.endsWith('/presence'));
+    assert.equal(request.options.method, 'POST');
+    assert.match(request.options.headers.Authorization, /^Bearer /);
+    assert.equal(JSON.parse(request.options.body).availabilityStatus, 'available');
+    assert.match(JSON.stringify(h.render()), /Waiting for guest call/);
+    h.sockets[0].receive('CALL_REQUEST', { guestName: 'QA guest', roomNumber: '15' });
+    assert.match(JSON.stringify(h.render()), /Call from room 15/);
+    assert.equal(typeof h.accept(), 'function');
+  } finally { h.cleanup(); }
+});
+
+test('failed availability update leaves Go available visible instead of showing the queue', async () => {
+  const h = harness({}, 503);
+  try {
+    await flush();
+    h.sockets[0].onopen();
+    await h.button('Go available')();
+    const tree = JSON.stringify(h.render());
+    assert.match(tree, /Unable to update presence/);
+    assert.doesNotMatch(tree, /Waiting for guest call/);
+    assert.equal(typeof h.button('Go available'), 'function');
+  } finally { h.cleanup(); }
+});
+
+test('reconnected interpreter confirms availability again after the old socket closes', async () => {
+  const h = harness();
+  try {
+    await flush();
+    const socket = h.sockets[0];
+    socket.onopen();
+    await h.button('Go available')();
+    socket.readyState = 3;
+    socket.onclose({ code: 1006 });
+    h.runTimer(10000);
+    await flush();
+    h.sockets[1].onopen();
+    assert.doesNotMatch(JSON.stringify(h.render()), /Waiting for guest call/);
+    assert.equal(typeof h.button('Go available'), 'function');
+    await h.button('Go available')();
+    assert.match(JSON.stringify(h.render()), /Waiting for guest call/);
+    assert.equal(h.requests.filter(r => r.url.endsWith('/presence')).length, 2);
+  } finally { h.cleanup(); }
+});
 
 test('interpreter sockets reconnect in ten seconds without clearing credentials', async () => {
   const h = harness();

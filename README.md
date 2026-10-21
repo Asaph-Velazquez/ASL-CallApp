@@ -13,6 +13,10 @@ Dominio de llamadas del sistema ASL para conectar huespedes con interpretes en t
 ### Consola del Interprete
 - Login de interprete con token JWT
 - Cambio de disponibilidad para recibir llamadas
+- Tras iniciar sesion o reconectar sin reporte pendiente, pulsa **Go available**.
+  **Connected to call server** solo confirma el WebSocket; **Waiting for guest call**
+  aparece despues de que el servidor confirme la presencia disponible. Si hay un
+  reporte pendiente, primero debe entregarse para habilitar la disponibilidad.
 - Recepcion y aceptacion/rechazo de llamadas entrantes
 - Captura de reporte obligatorio al finalizar una llamada
 - Ante perdida de WebSocket, reconexion automatica cada 10 segundos con validacion de sesion y recuperacion del reporte pendiente. Las sesiones vencidas o revocadas requieren iniciar sesion nuevamente. Una llamada que el servidor ya finalizo por error de red conserva su requisito de reporte.

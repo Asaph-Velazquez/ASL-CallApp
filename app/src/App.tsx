@@ -632,7 +632,7 @@ export default function App() {
         displayedCallId = null;
         setActiveCallId(null);
         setIncomingCall(null);
-        setCallState('available');
+        setCallState('idle');
       }
 
       ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
@@ -1045,7 +1045,9 @@ export default function App() {
                 Go available
               </button>
             }
-          />
+          >
+            {error && <p className="error-banner" role="alert"><AlertIcon className="icon-sm" />{error}</p>}
+          </StatePanel>
         )}
 
         {token && callState === 'available' && (
