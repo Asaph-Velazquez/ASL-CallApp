@@ -198,6 +198,47 @@ el móvil, audio/video en ambas direcciones, cambio de cámara, envío del repor
 revocación de sesión y cierre de ventana con liberación de dispositivos. Compilar
 no sustituye esa prueba física; STUN sin TURN conserva sus limitaciones entre redes.
 
+### Aplicación de escritorio macOS (Tauri 2)
+
+Requiere macOS 12 o posterior, Xcode Command Line Tools, Rust y Node.js. Desde
+`ASL-CallAPP/app`, configura `.env.desktop.local` con las mismas URLs del gateway:
+
+```sh
+npm ci
+cp .env.desktop.example .env.desktop.local
+# Edita las URLs del gateway antes de compilar.
+APPLE_SIGNING_IDENTITY=- npm run desktop:build
+```
+
+La configuración `src-tauri/tauri.macos.conf.json` genera la aplicación en
+`src-tauri/target/release/bundle/macos/ASL Interpreter.app`. Opcionalmente, genera
+un DMG con `npm run desktop:build -- --bundles app,dmg` en un entorno que permita
+montar imágenes de disco. En Windows se conserva el instalador NSIS.
+`Info.plist` declara los motivos de acceso a cámara y micrófono, y
+`Entitlements.plist` declara `com.apple.security.device.camera` y
+`com.apple.security.device.audio-input` para la firma con Hardened Runtime.
+`APPLE_SIGNING_IDENTITY=-` aplica una firma ad hoc para las pruebas locales.
+Para distribuir a otros equipos usa una identidad Developer ID y notarización;
+una compilación local no equivale a una distribución notarizada.
+
+Abre la aplicación `.app` generada para comprobar permisos. Al pulsar **Accept**,
+se solicitan cámara y micrófono mediante `getUserMedia`; permite ambos. Si se
+denegaron antes, activa **ASL Interpreter** en **Configuración del Sistema >
+Privacidad y seguridad > Cámara / Micrófono**, cierra y vuelve a abrir la app si
+macOS lo solicita, y pulsa **Retry media**. La ejecución de desarrollo puede
+atribuir los permisos a la terminal o al proceso de desarrollo.
+
+La vista local usa video silenciado. Si WebKit bloquea la reproducción con audio,
+el video del huésped intenta continuar silenciado y **Enable guest audio** lo
+activa con un clic. Recibir video remoto no requiere permiso para usar la cámara
+local; el huésped debe conceder sus propios permisos en el móvil.
+
+Prueba física pendiente: llama desde ASL-MobileAPP, acepta en la `.app`, concede
+ambos permisos y confirma video local, video del huésped y audio en ambas
+direcciones. Repite después de denegar y volver a habilitar permisos. Las pruebas
+automatizadas y el empaquetado no verifican dispositivos físicos ni conectividad
+entre redes; STUN sin TURN puede fallar en redes con NAT o firewall restrictivos.
+
 Verificación del empaquetado (2026-10-08): compilación release y NSIS x64
 correctas; el ejecutable inicia y responde con título **ASL Interpreter Console**.
 Las 12 pruebas de la consola pasan. La suite del servidor pasa una prueba y omite

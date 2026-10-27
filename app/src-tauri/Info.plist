@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSCameraUsageDescription</key>
+    <string>ASL Interpreter necesita acceso a la cámara para transmitir tu video durante las llamadas de interpretación.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>ASL Interpreter necesita acceso al micrófono para transmitir tu voz durante las llamadas de interpretación.</string>
+</dict>
+</plist>

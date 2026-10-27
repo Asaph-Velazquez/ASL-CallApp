@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, SVGProps, useEffect, useMemo, useRef, useState } from 'react';
 import CameraOptions from './CameraOptions';
 import CallHistory from './CallHistory';
-import { replaceCamera } from './camera';
+import { captureCallMedia, mediaCaptureErrorMessage, replaceCamera } from './camera';
 import hotelLogoUrl from '../assets/Logo/Hotel logo.png';
 
 const API_URL = import.meta.env.VITE_CALL_API_URL || 'http://localhost:3101';
@@ -298,7 +298,13 @@ export default function App() {
       if (generation === mediaGenerationRef.current) setRemotePlaybackBlocked(false);
     } catch (cause) {
       if (generation !== mediaGenerationRef.current) return;
-      if (cause instanceof Error && cause.name === 'NotAllowedError') setRemotePlaybackBlocked(true);
+      if (cause instanceof Error && cause.name === 'NotAllowedError') {
+        // WebKit can block audible autoplay after signaling/permission prompts.
+        // Keep the guest visible while waiting for a click to enable audio.
+        setRemotePlaybackBlocked(true);
+        element.muted = true;
+        try { await element.play(); } catch { /* Native video controls remain available. */ }
+      }
     }
   }
 
@@ -428,10 +434,7 @@ export default function App() {
       setMediaState('preparing');
       setMediaMessage('Requesting access to camera and microphone...');
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: cameraIdRef.current ? { deviceId: { exact: cameraIdRef.current } } : { facingMode: 'user' },
-        audio: true,
-      });
+      const stream = await captureCallMedia(navigator.mediaDevices, cameraIdRef.current);
 
       if (generation !== mediaGenerationRef.current || activeCallIdRef.current !== callId) {
         stopMediaTracks(stream);
@@ -466,14 +469,7 @@ export default function App() {
       localStreamRef.current = null;
       attachStream(localVideoRef.current, null);
       setMediaState('error');
-      const name = mediaError instanceof Error ? mediaError.name : '';
-      setMediaMessage(name === 'NotAllowedError'
-        ? 'Allow camera and microphone access in the browser site settings, then retry media.'
-        : name === 'NotFoundError'
-          ? 'No camera or microphone was found. Connect both devices and retry media.'
-          : name === 'NotReadableError'
-            ? 'Camera or microphone is unavailable. Close other apps using it and retry media.'
-            : mediaError instanceof Error ? mediaError.message : 'Unable to access camera and microphone.');
+      setMediaMessage(mediaCaptureErrorMessage(mediaError));
     }
   }
 
@@ -1170,8 +1166,9 @@ export default function App() {
                 </div>
                 <div className="video-frame">
                   <video ref={remoteVideoRef} className="video-surface" autoPlay playsInline controls
-                    onLoadedMetadata={() => void playRemoteMedia()} onPlaying={() => setRemotePlaybackBlocked(false)} />
-                  {mediaState !== 'connected' && (
+                    onLoadedMetadata={() => void playRemoteMedia()}
+                    onPlaying={(event) => { if (!event.currentTarget.muted) setRemotePlaybackBlocked(false); }} />
+                  {!remoteStreamRef.current?.getVideoTracks().length && (
                     <div className="video-placeholder">
                       <WifiIcon className="icon-md" />
                       <p>{mediaMessage}</p>
@@ -1179,7 +1176,7 @@ export default function App() {
                   )}
                 </div>
                 {remotePlaybackBlocked && <div role="status">
-                  <p>Your browser paused guest audio/video. Enable playback to hear the guest.</p>
+                  <p>Guest audio is paused. Enable audio to hear the guest; video can continue muted.</p>
                   <button type="button" className="ghost-button" onClick={() => void playRemoteMedia()}>Enable guest audio</button>
                 </div>}
               </article>

@@ -7,7 +7,7 @@
     "dev": "vite",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build --bundles nsis",
+    "desktop:build": "tauri build",
     "desktop:icons": "tauri icon \"assets/Logo/Hotel logo.png\"",
     "desktop:frontend": "tsc -b && vite build --mode desktop",
     "build": "tsc -b && vite build",

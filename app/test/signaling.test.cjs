@@ -4,6 +4,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const ts = require('typescript');
 const flush = () => new Promise(resolve => setImmediate(resolve));
+function find(node, predicate) {
+  if (!node || typeof node !== 'object') return;
+  if (node.props && predicate(node)) return node;
+  for (const child of Object.values(node)) { const match = find(child, predicate); if (match) return match; }
+}
+const camera = { exports: {} };
+const cameraCode = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../src/camera.ts'), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+new Function('exports', cameraCode)(camera.exports);
 
 function harness(session = {}, presenceStatus = 200) {
   const slots = [], effects = [], sockets = [], peers = [], cleanups = [];
@@ -59,7 +69,7 @@ function harness(session = {}, presenceStatus = 200) {
   const storage = new Map([['interpreter_token', token], ['interpreter_profile', JSON.stringify(profile)]]);
   const localStream = new Stream();
   localStream.addTrack({ id: 'camera', kind: 'video', enabled: true, stop: () => stopped++ });
-  const imports = { react, '../assets/Logo/Hotel logo.png': { default: 'hotel-logo.png' }, './CallHistory': { default: 'CallHistory' }, './CameraOptions': { default: 'CameraOptions' }, './camera': {}, 'react/jsx-runtime': {
+  const imports = { react, '../assets/Logo/Hotel logo.png': { default: 'hotel-logo.png' }, './CallHistory': { default: 'CallHistory' }, './CameraOptions': { default: 'CameraOptions' }, './camera': camera.exports, 'react/jsx-runtime': {
     jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }),
   } };
   const source = fs.readFileSync(path.join(__dirname, '../src/App.tsx'), 'utf8').replaceAll('import.meta.env', '({})');
@@ -267,32 +277,57 @@ test('a guest cancelling before acceptance does not require an interpreter repor
   assert.equal(h.counts().captures, 0);
 });
 
-test('blocked guest audio offers a playback action and retries on user click', async () => {
+test('blocked guest audio keeps guest video playing muted and enables audio on click', async () => {
   const h = harness();
   await flush();
   h.sockets[0].receive('CALL_REQUEST', { guestName: 'QA', roomNumber: '15' });
   const accepted = h.accept()();
   h.resolveCapture(); await accepted;
-  function find(node, predicate) {
-    if (!node || typeof node !== 'object') return;
-    if (node.props && predicate(node)) return node;
-    for (const child of Object.values(node)) { const match = find(child, predicate); if (match) return match; }
-  }
   const video = find(h.render(), n => n.type === 'video' && !n.props.muted);
   let blocked = true, plays = 0;
   const element = { muted: true, srcObject: null, async play() {
     plays++;
-    if (blocked) { const error = new Error('Gesture required'); error.name = 'NotAllowedError'; throw error; }
+    if (blocked && !this.muted) { const error = new Error('Gesture required'); error.name = 'NotAllowedError'; throw error; }
   } };
   video.props.ref.current = element;
-  h.peers[0].ontrack({ track: { id: 'guest-audio', kind: 'audio' }, streams: [] });
+  const audio = { id: 'guest-audio', kind: 'audio' };
+  const guestVideo = { id: 'guest-video', kind: 'video' };
+  h.peers[0].ontrack({ track: guestVideo, streams: [{ getTracks: () => [guestVideo, audio] }] });
   await flush();
-  assert.equal(element.muted, false);
+  assert.equal(element.muted, true);
+  assert.equal(plays, 2, 'audible autoplay falls back to muted video');
+  assert.equal(element.srcObject.getVideoTracks().length, 1);
   assert.equal(element.srcObject.getAudioTracks().length, 1);
+  video.props.onPlaying({ currentTarget: element });
   const button = find(h.render(), n => n.type === 'button' && n.props.children === 'Enable guest audio');
   assert.ok(button);
   blocked = false;
   button.props.onClick(); await flush();
-  assert.equal(plays, 2);
+  assert.equal(plays, 3);
+  assert.equal(element.muted, false);
   assert.ok(!find(h.render(), n => n.type === 'button' && n.props.children === 'Enable guest audio'));
+});
+
+test('guest tracks attach even when local capture is still waiting for macOS permission', async () => {
+  const h = harness();
+  try {
+    await flush();
+    h.sockets[0].receive('CALL_REQUEST', { guestName: 'QA', roomNumber: '15' });
+    const accepted = h.accept()();
+    h.sockets[0].receive('WEBRTC_ICE_CANDIDATE', { candidate: { candidate: 'early' } });
+    await flush();
+    const video = find(h.render(), n => n.type === 'video' && !n.props.muted);
+    const element = { muted: false, srcObject: null, async play() {} };
+    video.props.ref.current = element;
+    const guest = { id: 'guest-video', kind: 'video' };
+    h.peers[0].ontrack({ track: guest, streams: [] });
+    assert.equal(element.srcObject.getVideoTracks()[0], guest);
+    h.resolveCapture();
+    await accepted;
+    assert.match(JSON.stringify(h.render()), /Active interpretation call/);
+    assert.equal(h.counts().captures, 1);
+    assert.equal(h.peers.length, 1);
+    const remoteCard = find(h.render(), n => n.type === 'article' && Boolean(find(n.props.children, c => c.type === 'h3' && c.props.children === 'Remote video')));
+    assert.ok(!find(remoteCard, n => n.props.className === 'video-placeholder'), 'a pending local capture must not cover guest video');
+  } finally { h.cleanup(); }
 });
