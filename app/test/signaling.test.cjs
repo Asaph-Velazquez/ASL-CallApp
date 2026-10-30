@@ -17,7 +17,7 @@ new Function('exports', cameraCode)(camera.exports);
 
 function harness(session = {}, presenceStatus = 200) {
   const slots = [], effects = [], sockets = [], peers = [], cleanups = [];
-  const requests = [];
+  const requests = [], captureRequests = [];
   const timers = new Map();
   let timerId = 0;
   let index = 0, resolveCapture, captures = 0, stopped = 0;
@@ -57,9 +57,12 @@ function harness(session = {}, presenceStatus = 200) {
     signalingState = 'stable';
     remoteDescription = null;
     candidates = [];
+    sentTracks = [];
     constructor() { peers.push(this); }
     getSenders() { return []; }
-    addTrack() {}
+    addTrack(track, stream) { this.sentTracks.push({ track, stream }); }
+    async createOffer() { return { type: 'offer', sdp: 'qa-outgoing-media' }; }
+    async setLocalDescription(sdp) { this.localDescription = sdp; }
     async setRemoteDescription(sdp) { this.remoteDescription = sdp; }
     async addIceCandidate(candidate) { assert.ok(this.remoteDescription); this.candidates.push(candidate); }
     close() { this.closed = true; }
@@ -78,7 +81,7 @@ function harness(session = {}, presenceStatus = 200) {
   new Function('module', 'exports', 'require', 'localStorage', 'navigator', 'window', 'fetch', 'WebSocket', 'RTCPeerConnection', 'MediaStream', 'document', 'setTimeout', 'clearTimeout', code)(
     module, module.exports, name => imports[name],
     { getItem: key => storage.get(key) || null, removeItem: key => storage.delete(key) },
-    { mediaDevices: { getUserMedia: () => { captures++; return capture; } } }, { isSecureContext: true },
+    { mediaDevices: { getUserMedia: constraints => { captures++; captureRequests.push(constraints); return capture; } } }, { isSecureContext: true },
     async (url, options) => {
       requests.push({ url, options });
       if (url.endsWith('/presence')) {
@@ -106,7 +109,7 @@ function harness(session = {}, presenceStatus = 200) {
     }
   }
   render();
-  return { sockets, peers, render, accept: () => button('Accept'), button, requests, localStream, storage,
+  return { sockets, peers, render, accept: () => button('Accept'), button, requests, captureRequests, localStream, storage,
     timers,
     runTimer(delay) {
       const [id, timer] = [...timers].find(([, timer]) => timer.delay === delay) || [];
@@ -347,5 +350,34 @@ test('guest tracks attach even when local capture is still waiting for macOS per
     assert.equal(h.peers.length, 1);
     const remoteCard = find(h.render(), n => n.type === 'article' && Boolean(find(n.props.children, c => c.type === 'h3' && c.props.children === 'Remote video')));
     assert.ok(!find(remoteCard, n => n.props.className === 'video-placeholder'), 'a pending local capture must not cover guest video');
+  } finally { h.cleanup(); }
+});
+
+test('CPM_INT_002: permitted capture previews and sends both local tracks while remote guest video attaches independently', async () => {
+  const h = harness();
+  try {
+    await flush();
+    h.sockets[0].receive('CALL_REQUEST', { guestName: 'QA', roomNumber: '15' });
+    h.localStream.addTrack({ id: 'microphone', kind: 'audio', enabled: true, stop() {} });
+    const accepted = h.accept()();
+    assert.deepEqual(h.captureRequests, [{ video: true, audio: true }]);
+    const localVideo = find(h.render(), node => node.type === 'video' && node.props.muted);
+    const localElement = { muted: true, srcObject: null, async play() {} };
+    localVideo.props.ref.current = localElement;
+    h.resolveCapture();
+    await accepted;
+    assert.equal(localElement.srcObject, h.localStream);
+    const peer = h.peers[0];
+    assert.deepEqual(peer.sentTracks.map(item => item.track.kind).sort(), ['audio', 'video']);
+    assert.ok(peer.sentTracks.every(item => item.stream === h.localStream));
+    await peer.onnegotiationneeded();
+    assert.ok(h.sockets[0].sent.some(message => message.type === 'WEBRTC_OFFER' && message.payload.sdp.sdp === 'qa-outgoing-media'));
+    const remoteVideo = find(h.render(), node => node.type === 'video' && !node.props.muted);
+    const remoteElement = { muted: false, srcObject: null, async play() {} };
+    remoteVideo.props.ref.current = remoteElement;
+    const guestVideo = { id: 'guest-video', kind: 'video' };
+    peer.ontrack({ track: guestVideo, streams: [] });
+    assert.equal(remoteElement.srcObject.getVideoTracks()[0], guestVideo);
+    assert.equal(localElement.srcObject, h.localStream);
   } finally { h.cleanup(); }
 });
