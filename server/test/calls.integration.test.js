@@ -159,6 +159,35 @@ test('isolated call server: request, ring, accept, signaling, end and persistenc
       assert.equal((await connection.collection('interpreterpresences').findOne({ interpreterId: identity.userId })).availabilityStatus, 'available');
     });
 
+    await t.test('CPM_INT_016: rejecting, retrying and cancelling before acceptance never requires a report', async () => {
+      await available();
+      const callId = 'qa-reject-retry-cancel';
+      const mobile = await guest(callId);
+      mobile.send('CALL_REQUEST', { callId });
+      await interpreter.wait('CALL_REQUEST', callId);
+      interpreter.send('CALL_REJECTED', { callId });
+      await mobile.wait('CALL_REJECTED', callId);
+      mobile.send('CALL_REQUEST', { callId });
+      await poll(() => interpreter.messages.filter(m => m.type === 'CALL_REQUEST' && m.payload.callId === callId).length === 2, 'retry rings again');
+      mobile.send('CALL_ENDED', { callId, reason: 'guest_cancelled' });
+      const ended = await interpreter.wait('CALL_ENDED', callId);
+      assert.equal(ended.payload.reportRequired, false);
+      const session = await connection.collection('callsessions').findOne({ callId });
+      assert.equal(session.answeredAt, null);
+      const response = await fetch(`${base}/api/interpreter/session`, { headers: { Authorization: `Bearer ${login.token}` } });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).pendingCall, null);
+      const report = await fetch(`${base}/api/calls/${callId}/report`, {
+        method: 'POST', headers: { Authorization: `Bearer ${login.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ summary: 'Not accepted', priority: 'low', category: 'services', followUpRequired: false }),
+      });
+      assert.equal(report.status, 409);
+      const presence = await connection.collection('interpreterpresences').findOne({ interpreterId: identity.userId });
+      assert.equal(presence.currentCallId, null);
+      assert.equal(presence.availabilityStatus, 'available');
+      await available();
+    });
+
     await t.test('history isolates ownership, reports and pagination through authenticated HTTP', async () => {
       const foreignId = '222222222222222222222222';
       const sessions = Array.from({ length: 22 }, (_, index) => ({
@@ -189,7 +218,7 @@ test('isolated call server: request, ring, accept, signaling, end and persistenc
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('cache-control'), 'no-store');
       assert.equal(response.headers.get('access-control-allow-origin'), 'http://tauri.localhost');
-      assert.equal(data.total, 24); // 22 fixtures y dos llamadas aceptadas anteriores.
+      assert.equal(data.total, 25); // 22 fixtures, dos llamadas aceptadas y una cancelación.
       assert.equal(data.totalPages, 2);
       assert.equal(data.calls.length, 20);
       assert.equal(data.calls[0].callId, 'qa-history-21');
@@ -201,7 +230,7 @@ test('isolated call server: request, ring, accept, signaling, end and persistenc
       assert.equal(data.calls[1].interpreterId, undefined);
       assert.ok(!JSON.stringify(data).includes('PRIVATE'));
       const next = await history('?page=2&pageSize=20');
-      assert.equal(next.data.calls.length, 4);
+      assert.equal(next.data.calls.length, 5);
       assert.ok(!next.data.calls.some(call => data.calls.some(first => first.callId === call.callId)));
       for (const query of ['?page=0', '?pageSize=51', '?page=1.5', '?page[$ne]=1']) {
         assert.equal((await history(query)).response.status, 400);

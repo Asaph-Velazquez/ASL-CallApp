@@ -235,7 +235,7 @@ async function finalizeCall(callId, endReason, status = 'completed') {
         ? { userId: existingSession.interpreterId, fullName: existingSession.interpreterName }
         : null;
 
-  const reportRequired = Boolean(existingSession?.interpreterId && existingSession.reportForwardStatus !== 'forwarded');
+  const reportRequired = Boolean(existingSession?.interpreterId && existingSession.answeredAt && existingSession.reportForwardStatus !== 'forwarded');
   if (interpreterMeta?.userId) {
     const otherPending = await pendingReportFor(interpreterMeta.userId);
     await releaseInterpreter(interpreterMeta, reportRequired || otherPending ? 'busy' : 'available');
@@ -309,7 +309,7 @@ app.post('/api/interpreter/login', createLoginLimiter(), async (req, res) => {
 });
 
 async function pendingReportFor(interpreterId) {
-  const session = await CallSession.findOne({ interpreterId, status: 'completed', reportForwardStatus: { $ne: 'forwarded' } })
+  const session = await CallSession.findOne({ interpreterId, answeredAt: { $ne: null }, status: 'completed', reportForwardStatus: { $ne: 'forwarded' } })
     .sort({ endedAt: 1 }).lean();
   if (!session) return null;
   const report = await InterpreterReport.findOne({ callId: session.callId }).sort({ submittedAt: 1 }).lean();
@@ -366,7 +366,7 @@ app.post('/api/calls/:callId/report', verifyInterpreterHttp, async (req, res) =>
       return res.status(403).json({ error: 'Interpreter does not own this call' });
     }
 
-    if (session.status !== 'completed') {
+    if (session.status !== 'completed' || !session.answeredAt) {
       return res.status(409).json({ error: 'Call is not ready for report submission' });
     }
 

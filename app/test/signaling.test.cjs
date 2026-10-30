@@ -277,6 +277,24 @@ test('a guest cancelling before acceptance does not require an interpreter repor
   assert.equal(h.counts().captures, 0);
 });
 
+test('CPM_INT_016: rejection followed by a retried invitation and guest cancellation closes without capture or report', async () => {
+  const h = harness();
+  try {
+    await flush();
+    const socket = h.sockets[0];
+    socket.receive('CALL_REQUEST', { guestName: 'QA', roomNumber: '15' });
+    await h.button('Reject')();
+    assert.ok(socket.sent.some(message => message.type === 'CALL_REJECTED'));
+    socket.receive('CALL_REQUEST', { guestName: 'QA', roomNumber: '15' });
+    assert.match(JSON.stringify(h.render()), /Call from room 15/);
+    socket.receive('CALL_ENDED', { reportRequired: false });
+    const tree = JSON.stringify(h.render());
+    assert.doesNotMatch(tree, /Mandatory interpreter report|Call from room 15/);
+    assert.match(tree, /Waiting for guest call/);
+    assert.equal(h.counts().captures, 0);
+  } finally { h.cleanup(); }
+});
+
 test('blocked guest audio keeps guest video playing muted and enables audio on click', async () => {
   const h = harness();
   await flush();

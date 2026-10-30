@@ -108,7 +108,7 @@ test('real call-to-hotel report bridge, retries, recovery and live dashboard eve
     const callId = 'qa-report-call';
     const endedAt = new Date();
     await dbs[0].collection('callsessions').insertOne({ callId, status: 'completed', interpreterId: String(operatorId),
-      interpreterName: 'QA Interpreter', roomNumber: 'QA-15', guestName: 'QA Guest', endedAt, reportForwardStatus: 'pending' });
+      interpreterName: 'QA Interpreter', roomNumber: 'QA-15', guestName: 'QA Guest', answeredAt: new Date(endedAt.getTime() - 1000), endedAt, reportForwardStatus: 'pending' });
     const report = { summary: 'Guest requests hotel assistance', category: 'Room issue', priority: 'high', followUpRequired: true, notes: 'Hotel should inspect the room.' };
     assert.equal((await request(callBase, `/api/calls/${callId}/report`, stranger, report)).status, 403);
     assert.equal((await request(callBase, `/api/calls/${callId}/report`, interpreter, { ...report, priority: 'invalid' })).status, 400);
@@ -157,7 +157,7 @@ test('real call-to-hotel report bridge, retries, recovery and live dashboard eve
     loseReply = false;
 
     await dbs[0].collection('callsessions').insertOne({ callId: 'qa-no-followup', status: 'completed', interpreterId: String(operatorId),
-      roomNumber: 'QA-15', guestName: 'QA Guest', endedAt: new Date() });
+      roomNumber: 'QA-15', guestName: 'QA Guest', answeredAt: new Date(), endedAt: new Date() });
     assert.equal((await request(callBase, '/api/calls/qa-no-followup/report', interpreter,
       { ...report, followUpRequired: false, notes: '' })).status, 201);
     assert.equal(await dbs[1].collection('requests').countDocuments(), 1);
