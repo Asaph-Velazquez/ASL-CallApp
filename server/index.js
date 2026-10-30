@@ -8,6 +8,7 @@ import { WebSocketServer } from 'ws';
 import { CallSession, InterpreterPresence, InterpreterReport } from './models/index.js';
 import { createInterpreterAuth, createLoginLimiter } from './interpreterAuth.js';
 import { createInterpreterHistoryRouter } from './interpreterHistory.js';
+import { startCallHeartbeat } from './callHeartbeat.js';
 
 config();
 
@@ -115,6 +116,7 @@ async function verifyInterpreterHttp(req, res, next) {
 
 const server = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
+startCallHeartbeat(wss);
 const socketMeta = new WeakMap();
 const interpreterSockets = new Map();
 const callPeers = new Map();

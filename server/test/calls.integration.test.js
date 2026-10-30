@@ -138,6 +138,27 @@ test('isolated call server: request, ring, accept, signaling, end and persistenc
       assert.match(errors, /CALL_MESSAGE_FAILED/);
     });
 
+    await t.test('CPM_MOV_042: guest connection loss ends the active call and clears the interpreter reservation', async () => {
+      await available();
+      const callId = 'qa-network-loss';
+      const mobile = await guest(callId);
+      mobile.send('CALL_REQUEST', { callId });
+      await interpreter.wait('CALL_REQUEST', callId);
+      interpreter.send('CALL_ACCEPTED', { callId });
+      await mobile.wait('CALL_ACCEPTED', callId);
+      mobile.ws.terminate();
+      const ended = await interpreter.wait('CALL_ENDED', callId);
+      assert.equal(ended.payload.endReason, 'network_error');
+      assert.equal(ended.payload.reportRequired, true);
+      const presence = await connection.collection('interpreterpresences').findOne({ interpreterId: identity.userId });
+      assert.equal(presence.currentCallId, null);
+      assert.equal(presence.availabilityStatus, 'busy');
+      assert.equal((await connection.collection('callsessions').findOne({ callId })).status, 'completed');
+      await connection.collection('callsessions').updateOne({ callId }, { $set: { reportForwardStatus: 'forwarded' } });
+      await available();
+      assert.equal((await connection.collection('interpreterpresences').findOne({ interpreterId: identity.userId })).availabilityStatus, 'available');
+    });
+
     await t.test('history isolates ownership, reports and pagination through authenticated HTTP', async () => {
       const foreignId = '222222222222222222222222';
       const sessions = Array.from({ length: 22 }, (_, index) => ({
@@ -168,7 +189,7 @@ test('isolated call server: request, ring, accept, signaling, end and persistenc
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('cache-control'), 'no-store');
       assert.equal(response.headers.get('access-control-allow-origin'), 'http://tauri.localhost');
-      assert.equal(data.total, 23); // 22 fixtures plus the completed real call above.
+      assert.equal(data.total, 24); // 22 fixtures y dos llamadas aceptadas anteriores.
       assert.equal(data.totalPages, 2);
       assert.equal(data.calls.length, 20);
       assert.equal(data.calls[0].callId, 'qa-history-21');
@@ -180,7 +201,7 @@ test('isolated call server: request, ring, accept, signaling, end and persistenc
       assert.equal(data.calls[1].interpreterId, undefined);
       assert.ok(!JSON.stringify(data).includes('PRIVATE'));
       const next = await history('?page=2&pageSize=20');
-      assert.equal(next.data.calls.length, 3);
+      assert.equal(next.data.calls.length, 4);
       assert.ok(!next.data.calls.some(call => data.calls.some(first => first.callId === call.callId)));
       for (const query of ['?page=0', '?pageSize=51', '?page=1.5', '?page[$ne]=1']) {
         assert.equal((await history(query)).response.status, 400);
