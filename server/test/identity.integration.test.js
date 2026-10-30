@@ -31,7 +31,7 @@ test('hotel-owned interpreter accounts: roles, legacy rejection, revocation and 
     const dbs = [], children = [], sockets = [];
     t.after(async () => {
       sockets.forEach(peer => peer.ws.terminate());
-      for (const child of children) if (child.exitCode === null && child.signalCode === null) { const exit = once(child, 'exit'); child.kill(); await exit; }
+      for (const child of children) if (child.pid && child.exitCode === null && child.signalCode === null) { const exit = once(child, 'exit'); child.kill(); await exit; }
       for (const db of dbs) {
         assert.ok([`${prefix}_hotel`, `${prefix}_call`].includes(db.name));
         assert.match(db.name, /^asl_qa_identity_[a-f0-9]{32}_(hotel|call)$/);
@@ -49,12 +49,29 @@ test('hotel-owned interpreter accounts: roles, legacy rejection, revocation and 
         env: { ...process.env, NODE_ENV: 'test', PORT: String(portNumber), CALL_INTERNAL_TOKEN: internalToken, ...env },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-      children.push(child); let errors = '';
-      child.stdout.on('data', () => {}); child.stderr.on('data', chunk => { errors += chunk; });
-      await poll(async () => {
-        if (child.exitCode !== null) throw Error(errors);
-        try { return (await fetch(`http://127.0.0.1:${portNumber}/api/health`)).ok; } catch { return false; }
-      });
+      children.push(child);
+      let output = '', errors = '', spawnError;
+      child.stdout.on('data', chunk => { output = (output + chunk).slice(-4096); });
+      child.stderr.on('data', chunk => { errors = (errors + chunk).slice(-4096); });
+      child.on('error', error => { spawnError = error; });
+      try {
+        await poll(async () => {
+          if (spawnError) throw spawnError;
+          if (child.exitCode !== null || child.signalCode !== null) throw Error('Server exited before becoming healthy');
+          try { return (await fetch(`http://127.0.0.1:${portNumber}/api/health`, { signal: AbortSignal.timeout(1000) })).ok; }
+          catch { return false; }
+        });
+      } catch (error) {
+        // El diagnóstico conserva sólo las últimas salidas y oculta credenciales de prueba.
+        let diagnostic = `${error.message}\nstdout: ${output || '(empty)'}\nstderr: ${errors || '(empty)'}`;
+        for (const credential of [internalToken, secret, interpreterSecret, password]) {
+          diagnostic = diagnostic.replaceAll(credential, '[redacted]');
+        }
+        diagnostic = diagnostic.replace(/(Bearer\s+)\S+/gi, '$1[redacted]')
+          .replace(/([?&](?:token|password|secret)=)[^\s&]+/gi, '$1[redacted]')
+          .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[redacted-jwt]');
+        throw Error(`Unable to start ${entry} on port ${portNumber} (exitCode=${child.exitCode}, signal=${child.signalCode}): ${diagnostic}`);
+      }
       return child;
     }
     const hotelProcess = await start('../../../ASL-Web/server/index.js', hotelPort, {
@@ -130,12 +147,35 @@ test('hotel-owned interpreter accounts: roles, legacy rejection, revocation and 
 
     const active = await connect(call, operator.token);
     await api(call, '/api/interpreter/presence', { availabilityStatus: 'available' }, operator.token);
-    const callId = 'qa-revocation';
-    const guest = await connect(call, jwt.sign({ scope: 'call', callId, roomNumber: 'QA-15', guestName: 'QA Guest' }, secret));
-    guest.ws.send(JSON.stringify({ type: 'CALL_REQUEST', payload: { callId } }));
-    await poll(() => active.messages.some(message => message.type === 'CALL_REQUEST'));
-    active.ws.send(JSON.stringify({ type: 'CALL_ACCEPTED', payload: { callId } }));
-    await poll(() => guest.messages.some(message => message.type === 'CALL_ACCEPTED'));
+    let callId, guest;
+    await t.test('CPM_INT_001: hotel-issued session traverses the gateway proxy, rings with guest context and exchanges SDP', async () => {
+      const stayId = `qa-stay-${randomUUID()}`;
+      await dbs[0].collection('stays').insertOne({ stayId, roomNumber: 'QA-15', guestName: 'QA Guest',
+        active: true, status: 'active', checkIn: new Date(Date.now() - 60000), checkOut: new Date(Date.now() + 3600000) });
+      const guestToken = jwt.sign({ stayId, roomNumber: 'QA-15', guestName: 'QA Guest' }, secret, { expiresIn: '1m' });
+      const session = await api(hotel, '/api/calls/session', {}, guestToken);
+      assert.equal(session.status, 200);
+      assert.equal(session.data.callServerUrl, `${hotel.replace('http:', 'ws:')}/calls`);
+      const claims = jwt.verify(session.data.callToken, secret);
+      assert.equal(claims.stayId, stayId);
+      assert.equal(claims.callId, session.data.callId);
+      assert.equal(claims.scope, 'call');
+      callId = session.data.callId;
+      const endpoint = new URL(session.data.callServerUrl);
+      guest = await connect(endpoint.origin.replace('ws:', 'http:'), session.data.callToken, endpoint.pathname);
+      guest.ws.send(JSON.stringify({ type: 'CALL_REQUEST', payload: { callId } }));
+      await poll(() => active.messages.some(message => message.type === 'CALL_REQUEST' && message.payload.callId === callId));
+      const invitation = active.messages.find(message => message.type === 'CALL_REQUEST' && message.payload.callId === callId);
+      assert.equal(invitation.payload.guestName, 'QA Guest');
+      assert.equal(invitation.payload.roomNumber, 'QA-15');
+      active.ws.send(JSON.stringify({ type: 'CALL_ACCEPTED', payload: { callId } }));
+      await poll(() => guest.messages.some(message => message.type === 'CALL_ACCEPTED' && message.payload.callId === callId));
+      active.ws.send(JSON.stringify({ type: 'WEBRTC_OFFER', payload: { callId, sdp: { type: 'offer', sdp: 'qa-proxied-offer' } } }));
+      await poll(() => guest.messages.some(message => message.type === 'WEBRTC_OFFER' && message.payload.sdp.sdp === 'qa-proxied-offer'));
+      guest.ws.send(JSON.stringify({ type: 'WEBRTC_ANSWER', payload: { callId, sdp: { type: 'answer', sdp: 'qa-proxied-answer' } } }));
+      await poll(() => active.messages.some(message => message.type === 'WEBRTC_ANSWER' && message.payload.sdp.sdp === 'qa-proxied-answer'));
+      assert.equal((await dbs[1].collection('callsessions').findOne({ callId })).status, 'active');
+    });
     const deleted = (await login(call, 'delete-me')).data;
     const idle = await connect(call, deleted.token);
     await api(call, '/api/interpreter/presence', { availabilityStatus: 'available' }, deleted.token);
